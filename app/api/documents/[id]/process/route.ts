@@ -321,7 +321,6 @@ export async function POST(
       error: `Processing failed: ${error?.message || 'Unknown error'}` 
     }, { status: 500 })
   }
-}
 
 // Helper methods for processing different document types
 async function processW2Document(extractedData: ExtractedFieldData): Promise<any[]> {
