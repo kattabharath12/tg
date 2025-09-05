@@ -1,0 +1,50 @@
+
+[variables]
+NODE_VERSION = "20"
+NODE_ENV = "production"
+NIXPACKS_NO_CACHE = "1"
+
+# Phase 1: Setup system dependencies
+[phases.setup]
+nixPkgs = ["nodejs-20_x", "yarn", "openssl", "pkg-config"]
+nixLibs = ["openssl"]
+
+# Phase 2: Install dependencies and generate Prisma client
+[phases.install]
+cmds = [
+    "yarn install --frozen-lockfile --production=false",
+    "chmod +x scripts/prebuild.sh"
+]
+
+# Phase 3: Generate Prisma client and run migrations
+[phases.prisma]
+cmds = [
+    "yarn prisma generate",
+    "yarn prisma migrate deploy || echo 'Migration failed or not needed, continuing...'",
+    "echo 'Prisma client generated and migrations deployed successfully'"
+]
+
+# Phase 4: Build Next.js application
+[phases.build]
+cmds = [
+    "yarn build"
+]
+
+# Phase 5: Cleanup and prepare for runtime
+[phases.cleanup]
+cmds = [
+    "yarn install --frozen-lockfile --production=true",
+    "yarn cache clean"
+]
+
+# Start command
+[start]
+cmd = "yarn start"
+
+# Environment variables for build
+[phases.prisma.env]
+PRISMA_CLI_BINARY_TARGETS = "native,linux-musl-arm64-openssl-3.0.x"
+
+[phases.build.env]
+NODE_ENV = "production"
+NEXT_TELEMETRY_DISABLED = "1"

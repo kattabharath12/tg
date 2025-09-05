@@ -1,0 +1,95 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Debug Document Upload</title>
+</head>
+<body>
+    <h1>Debug Document Upload Test</h1>
+    
+    <div id="status"></div>
+    
+    <script>
+        async function testUpload() {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = 'Starting test...<br>';
+            
+            try {
+                // Step 1: Check session
+                statusDiv.innerHTML += 'Checking session...<br>';
+                const sessionRes = await fetch('/api/auth/session');
+                const session = await sessionRes.json();
+                
+                if (!session.user) {
+                    statusDiv.innerHTML += '❌ No authenticated session. Please log in first.<br>';
+                    return;
+                }
+                statusDiv.innerHTML += `✅ Authenticated as: ${session.user.email}<br>`;
+                
+                // Step 2: Get tax returns
+                statusDiv.innerHTML += 'Getting tax returns...<br>';
+                const taxReturnsRes = await fetch('/api/tax-returns');
+                const taxReturns = await taxReturnsRes.json();
+                
+                if (!taxReturns || taxReturns.length === 0) {
+                    statusDiv.innerHTML += '❌ No tax returns found<br>';
+                    return;
+                }
+                
+                const taxReturnId = taxReturns[0].id;
+                statusDiv.innerHTML += `✅ Using tax return: ${taxReturnId}<br>`;
+                
+                // Step 3: Test upload with a dummy file
+                statusDiv.innerHTML += 'Creating test file...<br>';
+                const testFileContent = 'This is a test PDF content';
+                const testFile = new Blob([testFileContent], { type: 'application/pdf' });
+                
+                const formData = new FormData();
+                formData.append('file', testFile, 'test-1099.pdf');
+                formData.append('taxReturnId', taxReturnId);
+                
+                statusDiv.innerHTML += 'Uploading test file...<br>';
+                const uploadRes = await fetch('/api/documents/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                statusDiv.innerHTML += `Upload response status: ${uploadRes.status}<br>`;
+                
+                if (!uploadRes.ok) {
+                    const errorText = await uploadRes.text();
+                    statusDiv.innerHTML += `❌ Upload failed: ${errorText}<br>`;
+                    return;
+                }
+                
+                const document = await uploadRes.json();
+                statusDiv.innerHTML += `✅ Upload successful! Document ID: ${document.id}<br>`;
+                
+                // Step 4: Test processing
+                statusDiv.innerHTML += 'Testing document processing...<br>';
+                const processRes = await fetch(`/api/documents/${document.id}/process`, {
+                    method: 'POST'
+                });
+                
+                statusDiv.innerHTML += `Process response status: ${processRes.status}<br>`;
+                
+                if (!processRes.ok) {
+                    const errorText = await processRes.text();
+                    statusDiv.innerHTML += `❌ Processing failed: ${errorText}<br>`;
+                    return;
+                }
+                
+                statusDiv.innerHTML += '✅ Processing started successfully!<br>';
+                statusDiv.innerHTML += 'Check server logs for detailed processing information.<br>';
+                
+            } catch (error) {
+                statusDiv.innerHTML += `💥 Test failed: ${error.message}<br>`;
+                console.error('Test error:', error);
+            }
+        }
+        
+        // Auto-run test when page loads
+        document.addEventListener('DOMContentLoaded', testUpload);
+    </script>
+</body>
+</html>
