@@ -1770,3 +1770,20 @@ export class AzureDocumentIntelligenceService {
     return !isNaN(amount) && isFinite(amount) && amount >= 0;
   }
 }
+
+/**
+ * Factory function to create and return an AzureDocumentIntelligenceService instance
+ * This function is expected by the route files for dependency injection
+ */
+export function getAzureDocumentIntelligenceService(): AzureDocumentIntelligenceService {
+  const config: AzureDocumentIntelligenceConfig = {
+    endpoint: process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT || '',
+    apiKey: process.env.AZURE_DOCUMENT_INTELLIGENCE_KEY || ''
+  };
+  
+  if (!config.endpoint || !config.apiKey) {
+    throw new Error('Azure Document Intelligence configuration is missing. Please set AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and AZURE_DOCUMENT_INTELLIGENCE_KEY environment variables.');
+  }
+  
+  return new AzureDocumentIntelligenceService(config);
+}
