@@ -176,7 +176,7 @@ export function ExtractedDataVerification({
                     type={entry.type}
                   />
                 ) : (
-                  <DataPreview data={entry.extractedData} type={entry.type} />
+                  <DataPreview data={entry.extractedData} type={entry.type} documentType={entry.documentType} />
                 )}
               </div>
             ))}
@@ -199,6 +199,34 @@ function EditingForm({ data, onChange, onSave, onCancel, type }: EditingFormProp
   const updateData = (field: string, value: any) => {
     onChange({ ...data, [field]: value })
   }
+
+  // Helper function to render currency input
+  const renderCurrencyInput = (label: string, field: string) => (
+    <div>
+      <Label>{label}</Label>
+      <div className="relative">
+        <DollarSign className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
+        <Input
+          type="number"
+          step="0.01"
+          value={data[field] || ''}
+          onChange={(e) => updateData(field, parseFloat(e.target.value) || 0)}
+          className="pl-10"
+        />
+      </div>
+    </div>
+  );
+
+  // Helper function to render text input
+  const renderTextInput = (label: string, field: string) => (
+    <div>
+      <Label>{label}</Label>
+      <Input
+        value={data[field] || ''}
+        onChange={(e) => updateData(field, e.target.value)}
+      />
+    </div>
+  );
 
   return (
     <div className="space-y-4">
@@ -247,40 +275,93 @@ function EditingForm({ data, onChange, onSave, onCancel, type }: EditingFormProp
         />
       </div>
 
+      {/* Employer Information */}
       {data.employerName !== undefined && (
         <div className="grid grid-cols-2 gap-4">
-          <div>
-            <Label>Employer Name</Label>
-            <Input
-              value={data.employerName || ''}
-              onChange={(e) => updateData('employerName', e.target.value)}
-            />
-          </div>
-          <div>
-            <Label>Employer EIN</Label>
-            <Input
-              value={data.employerEIN || ''}
-              onChange={(e) => updateData('employerEIN', e.target.value)}
-            />
-          </div>
+          {renderTextInput('Employer Name', 'employerName')}
+          {renderTextInput('Employer EIN', 'employerEIN')}
         </div>
       )}
 
+      {/* Payer Information */}
       {data.payerName !== undefined && (
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <Label>Payer Name</Label>
-            <Input
-              value={data.payerName || ''}
-              onChange={(e) => updateData('payerName', e.target.value)}
-            />
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            {renderTextInput('Payer Name', 'payerName')}
+            {renderTextInput('Payer TIN', 'payerTIN')}
           </div>
-          <div>
-            <Label>Payer TIN</Label>
-            <Input
-              value={data.payerTIN || ''}
-              onChange={(e) => updateData('payerTIN', e.target.value)}
-            />
+          {data.payerAddress !== undefined && (
+            <div>
+              {renderTextInput('Payer Address', 'payerAddress')}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Recipient Information */}
+      {data.recipientName !== undefined && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            {renderTextInput('Recipient Name', 'recipientName')}
+            {renderTextInput('Recipient TIN', 'recipientTIN')}
+          </div>
+          {data.recipientAddress !== undefined && (
+            <div>
+              {renderTextInput('Recipient Address', 'recipientAddress')}
+            </div>
+          )}
+          {data.accountNumber !== undefined && (
+            <div className="grid grid-cols-2 gap-4">
+              {renderTextInput('Account Number', 'accountNumber')}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 1099-INT Specific Fields */}
+      {(data.interestIncome !== undefined || data.earlyWithdrawalPenalty !== undefined) && (
+        <div className="space-y-4">
+          <Separator />
+          <h4 className="text-sm font-semibold text-gray-700">1099-INT Details</h4>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {data.interestIncome !== undefined && renderCurrencyInput('Box 1 - Interest Income', 'interestIncome')}
+            {data.earlyWithdrawalPenalty !== undefined && renderCurrencyInput('Box 2 - Early Withdrawal Penalty', 'earlyWithdrawalPenalty')}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {data.interestOnUSavingsBonds !== undefined && renderCurrencyInput('Box 3 - Interest on US Savings Bonds', 'interestOnUSavingsBonds')}
+            {data.federalTaxWithheld !== undefined && renderCurrencyInput('Box 4 - Federal Tax Withheld', 'federalTaxWithheld')}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {data.investmentExpenses !== undefined && renderCurrencyInput('Box 5 - Investment Expenses', 'investmentExpenses')}
+            {data.foreignTaxPaid !== undefined && renderCurrencyInput('Box 6 - Foreign Tax Paid', 'foreignTaxPaid')}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {data.taxExemptInterest !== undefined && renderCurrencyInput('Box 8 - Tax-Exempt Interest', 'taxExemptInterest')}
+            {data.specifiedPrivateActivityBondInterest !== undefined && renderCurrencyInput('Box 9 - Specified Private Activity Bond Interest', 'specifiedPrivateActivityBondInterest')}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {data.marketDiscount !== undefined && renderCurrencyInput('Box 10 - Market Discount', 'marketDiscount')}
+            {data.bondPremium !== undefined && renderCurrencyInput('Box 11 - Bond Premium', 'bondPremium')}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {data.bondPremiumOnTreasuryObligations !== undefined && renderCurrencyInput('Box 12 - Bond Premium on Treasury Obligations', 'bondPremiumOnTreasuryObligations')}
+            {data.bondPremiumOnTaxExemptBond !== undefined && renderCurrencyInput('Box 13 - Bond Premium on Tax-Exempt Bond', 'bondPremiumOnTaxExemptBond')}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {data.taxExemptAndTaxCreditBondCUSIPNo !== undefined && renderTextInput('Box 14 - Tax-Exempt and Tax Credit Bond CUSIP No.', 'taxExemptAndTaxCreditBondCUSIPNo')}
+            {data.state !== undefined && renderTextInput('Box 15 - State', 'state')}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {data.stateIdentificationNo !== undefined && renderTextInput('Box 16 - State Identification No.', 'stateIdentificationNo')}
+            {data.stateTaxWithheld !== undefined && renderCurrencyInput('Box 17 - State Tax Withheld', 'stateTaxWithheld')}
           </div>
         </div>
       )}
@@ -300,11 +381,32 @@ function EditingForm({ data, onChange, onSave, onCancel, type }: EditingFormProp
 interface DataPreviewProps {
   data: any
   type: 'income' | 'deduction'
+  documentType?: string
 }
 
-function DataPreview({ data, type }: DataPreviewProps) {
+function DataPreview({ data, type, documentType }: DataPreviewProps) {
+  // Helper function to format currency
+  const formatCurrency = (amount: any) => {
+    if (!amount || amount === 0) return '$0.00';
+    return `$${parseFloat(amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  // Helper function to render field if it exists
+  const renderField = (label: string, value: any, isCurrency = false) => {
+    if (!value && value !== 0) return null;
+    return (
+      <div>
+        <Label className="text-sm font-medium text-gray-500">{label}</Label>
+        <p className="text-sm font-medium">
+          {isCurrency ? formatCurrency(value) : value}
+        </p>
+      </div>
+    );
+  };
+
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
+      {/* Basic Information */}
       <div className="grid grid-cols-2 gap-4">
         <div>
           <Label className="text-sm font-medium text-gray-500">
@@ -319,7 +421,7 @@ function DataPreview({ data, type }: DataPreviewProps) {
         </div>
         <div>
           <Label className="text-sm font-medium text-gray-500">Amount</Label>
-          <p className="text-sm font-medium">${data.amount?.toLocaleString() || '0'}</p>
+          <p className="text-sm font-medium">{formatCurrency(data.amount)}</p>
         </div>
       </div>
 
@@ -330,6 +432,7 @@ function DataPreview({ data, type }: DataPreviewProps) {
         </div>
       )}
 
+      {/* Payer/Employer Information */}
       {(data.employerName || data.payerName) && (
         <div className="grid grid-cols-2 gap-4">
           {data.employerName && (
@@ -350,6 +453,136 @@ function DataPreview({ data, type }: DataPreviewProps) {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Recipient Information */}
+      {(data.recipientName || data.employeeName) && (
+        <div className="grid grid-cols-2 gap-4">
+          {(data.recipientName || data.employeeName) && (
+            <div>
+              <Label className="text-sm font-medium text-gray-500">
+                {data.recipientName ? 'Recipient' : 'Employee'}
+              </Label>
+              <p className="text-sm">{data.recipientName || data.employeeName}</p>
+              {(data.recipientTIN || data.employeeSSN) && (
+                <p className="text-xs text-gray-400">
+                  {data.recipientTIN ? `TIN: ${data.recipientTIN}` : `SSN: ${data.employeeSSN}`}
+                </p>
+              )}
+            </div>
+          )}
+          {data.accountNumber && (
+            <div>
+              <Label className="text-sm font-medium text-gray-500">Account Number</Label>
+              <p className="text-sm">{data.accountNumber}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 1099-INT Specific Fields */}
+      {documentType === 'FORM_1099_INT' && (
+        <div className="space-y-4">
+          <Separator />
+          <h4 className="text-sm font-semibold text-gray-700">1099-INT Details</h4>
+          
+          {/* Primary Income Fields */}
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 1 - Interest Income', data.interestIncome, true)}
+            {renderField('Box 2 - Early Withdrawal Penalty', data.earlyWithdrawalPenalty, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 3 - Interest on US Savings Bonds', data.interestOnUSavingsBonds, true)}
+            {renderField('Box 4 - Federal Tax Withheld', data.federalTaxWithheld, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 5 - Investment Expenses', data.investmentExpenses, true)}
+            {renderField('Box 6 - Foreign Tax Paid', data.foreignTaxPaid, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 8 - Tax-Exempt Interest', data.taxExemptInterest, true)}
+            {renderField('Box 9 - Specified Private Activity Bond Interest', data.specifiedPrivateActivityBondInterest, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 10 - Market Discount', data.marketDiscount, true)}
+            {renderField('Box 11 - Bond Premium', data.bondPremium, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 12 - Bond Premium on Treasury Obligations', data.bondPremiumOnTreasuryObligations, true)}
+            {renderField('Box 13 - Bond Premium on Tax-Exempt Bond', data.bondPremiumOnTaxExemptBond, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 14 - Tax-Exempt and Tax Credit Bond CUSIP No.', data.taxExemptAndTaxCreditBondCUSIPNo)}
+            {renderField('Box 15 - State', data.state)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 16 - State Identification No.', data.stateIdentificationNo)}
+            {renderField('Box 17 - State Tax Withheld', data.stateTaxWithheld, true)}
+          </div>
+        </div>
+      )}
+
+      {/* 1099-DIV Specific Fields */}
+      {documentType === 'FORM_1099_DIV' && (
+        <div className="space-y-4">
+          <Separator />
+          <h4 className="text-sm font-semibold text-gray-700">1099-DIV Details</h4>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 1a - Ordinary Dividends', data.ordinaryDividends, true)}
+            {renderField('Box 1b - Qualified Dividends', data.qualifiedDividends, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 2a - Total Capital Gain Distributions', data.totalCapitalGain, true)}
+            {renderField('Box 3 - Nondividend Distributions', data.nondividendDistributions, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 4 - Federal Income Tax Withheld', data.federalTaxWithheld, true)}
+            {renderField('Box 5 - Section 199A Dividends', data.section199ADividends, true)}
+          </div>
+        </div>
+      )}
+
+      {/* 1099-MISC Specific Fields */}
+      {documentType === 'FORM_1099_MISC' && (
+        <div className="space-y-4">
+          <Separator />
+          <h4 className="text-sm font-semibold text-gray-700">1099-MISC Details</h4>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 1 - Rents', data.rents, true)}
+            {renderField('Box 2 - Royalties', data.royalties, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 3 - Other Income', data.otherIncome, true)}
+            {renderField('Box 4 - Federal Income Tax Withheld', data.federalTaxWithheld, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 5 - Fishing Boat Proceeds', data.fishingBoatProceeds, true)}
+            {renderField('Box 6 - Medical and Health Care Payments', data.medicalHealthPayments, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 7 - Nonemployee Compensation', data.nonemployeeCompensation, true)}
+            {renderField('Box 8 - Substitute Payments', data.substitutePayments, true)}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            {renderField('Box 9 - Crop Insurance Proceeds', data.cropInsuranceProceeds, true)}
+            {renderField('Box 10 - Gross Proceeds Paid to an Attorney', data.grossProceedsAttorney, true)}
+          </div>
         </div>
       )}
     </div>
