@@ -1778,11 +1778,11 @@ export class AzureDocumentIntelligenceService {
 export function getAzureDocumentIntelligenceService(): AzureDocumentIntelligenceService {
   const config: AzureDocumentIntelligenceConfig = {
     endpoint: process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT || '',
-    apiKey: process.env.AZURE_DOCUMENT_INTELLIGENCE_KEY || ''
+    apiKey: process.env.AZURE_DOCUMENT_INTELLIGENCE_API_KEY || ''
   };
   
   if (!config.endpoint || !config.apiKey) {
-    throw new Error('Azure Document Intelligence configuration is missing. Please set AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and AZURE_DOCUMENT_INTELLIGENCE_KEY environment variables.');
+    throw new Error('Azure Document Intelligence configuration is missing. Please set AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and AZURE_DOCUMENT_INTELLIGENCE_API_KEY environment variables.');
   }
   
   return new AzureDocumentIntelligenceService(config);
