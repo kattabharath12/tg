@@ -8,7 +8,7 @@ export interface AzureDocumentIntelligenceConfig {
 }
 
 export interface ExtractedFieldData {
-  [key: string]: string | number | DocumentType | number[] | undefined;
+  [key: string]: string | number | DocumentType | number[] | { [key: string]: number } | undefined;
   correctedDocumentType?: DocumentType;
   fullText?: string;
   confidence?: number;
