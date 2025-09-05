@@ -1699,3 +1699,27 @@ export class AzureDocumentIntelligenceService {
     return 0;
   }
 }
+
+/**
+ * Factory function to create an AzureDocumentIntelligenceService instance
+ * using environment variables for configuration
+ */
+export function getAzureDocumentIntelligenceService(): AzureDocumentIntelligenceService {
+  const endpoint = process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT;
+  const apiKey = process.env.AZURE_DOCUMENT_INTELLIGENCE_API_KEY;
+
+  if (!endpoint) {
+    throw new Error('AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT environment variable is required');
+  }
+
+  if (!apiKey) {
+    throw new Error('AZURE_DOCUMENT_INTELLIGENCE_API_KEY environment variable is required');
+  }
+
+  const config: AzureDocumentIntelligenceConfig = {
+    endpoint,
+    apiKey
+  };
+
+  return new AzureDocumentIntelligenceService(config);
+}
