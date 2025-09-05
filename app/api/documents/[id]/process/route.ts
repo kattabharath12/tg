@@ -527,4 +527,5 @@ async function processGenericDocument(extractedData: ExtractedFieldData): Promis
     
     return entries;
   }
+  }   
 
