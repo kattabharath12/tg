@@ -22,7 +22,6 @@ export async function POST(
     const document = await prisma.document.findUnique({
       where: {
         id: documentId,
-        userId: session.user.id,
       },
     });
 
