@@ -8,23 +8,310 @@ export interface AzureDocumentIntelligenceConfig {
 }
 
 export interface ExtractedFieldData {
-  [key: string]: string | number | DocumentType | number[] | { [key: string]: number } | undefined;
+  [key: string]: string | number | DocumentType | number[] | string[] | { [key: string]: number } | undefined;
   correctedDocumentType?: DocumentType;
   fullText?: string;
   confidence?: number;
+  extractionWarnings?: string[];
   fieldConfidences?: { [key: string]: number };
 }
 
 export interface FieldExtractionResult {
-  value: string | number;
+  value: any;
   confidence: number;
-  source: 'structured' | 'ocr' | 'corrected';
-  boundingBox?: number[];
+  source: 'structured' | 'ocr_primary' | 'ocr_fallback' | 'regex_enhanced';
+  method?: string;
 }
 
 export class AzureDocumentIntelligenceService {
   private client: DocumentAnalysisClient;
   private config: AzureDocumentIntelligenceConfig;
+  
+  // Comprehensive 1099-INT field definitions with all required fields
+  private readonly FORM_1099_INT_FIELDS = {
+    // Box 1: Interest Income (Payer must complete)
+    interestIncome: {
+      boxNumber: 1,
+      label: 'Interest Income',
+      required: true,
+      patterns: [
+        // Primary patterns - exact box matching
+        /(?:Box\s*1|1\.?\s*Interest\s+income)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Interest\s+income[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /1\s+Interest\s+income[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns (O->0, l->1, I->1)
+        /(?:Box\s*[1lI]|[1lI]\.?\s*Interest\s+income)[:\s]*\$?\s*([0-9,Ol]+\.?\d{0,2})/i,
+        // Position-based patterns for table layouts
+        /(?:^|\n)\s*1[:\s]*([0-9,]+\.?\d{0,2})/m,
+        // Context-based patterns
+        /Total\s+interest\s+income[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // Fallback patterns for poor OCR
+        /(?:lnterest|Interest).*?income.*?([0-9,]+\.?\d{0,2})/i
+      ]
+    },
+    
+    // Box 2: Early Withdrawal Penalty (CRITICAL - was showing $3 instead of $2,000)
+    earlyWithdrawalPenalty: {
+      boxNumber: 2,
+      label: 'Early Withdrawal Penalty',
+      required: false,
+      patterns: [
+        // Primary patterns with enhanced matching
+        /(?:Box\s*2|2\.?\s*Early\s+withdrawal\s+penalty)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Early\s+withdrawal\s+penalty[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /2\s+Early\s+withdrawal[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns
+        /(?:Box\s*[2Z]|[2Z]\.?\s*Early\s+withdrawal)[:\s]*\$?\s*([0-9,OZ]+\.?\d{0,2})/i,
+        // Enhanced patterns for common OCR errors
+        /Early.*?withdrawal.*?penalty.*?([0-9,]+\.?\d{0,2})/i,
+        /(?:Eariy|Early).*?withdrawal.*?([0-9,]+\.?\d{0,2})/i,
+        // Position-based patterns
+        /(?:^|\n)\s*2[:\s]*([0-9,]+\.?\d{0,2})/m,
+        // Table-based patterns with better context
+        /withdrawal.*?penalty.*?([0-9,]+\.\d{2})/i,
+        // Penalty-specific patterns
+        /penalty.*?early.*?withdrawal.*?([0-9,]+\.?\d{0,2})/i
+      ]
+    },
+    
+    // Box 3: Interest on U.S. Treasury Obligations (MISSING FIELD - $5,000)
+    interestOnUSavingsBonds: {
+      boxNumber: 3,
+      label: 'Interest on U.S. Treasury Obligations',
+      required: false,
+      patterns: [
+        // Primary patterns
+        /(?:Box\s*3|3\.?\s*Interest\s+on\s+U\.?S\.?\s+Treasury)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Interest\s+on\s+U\.?S\.?\s+Treasury\s+obligations[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /3\s+Interest\s+on\s+U\.?S\.?[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns
+        /(?:Box\s*[3E]|[3E]\.?\s*Interest\s+on\s+U\.?S\.?)[:\s]*\$?\s*([0-9,OE]+\.?\d{0,2})/i,
+        // Enhanced patterns for Treasury obligations
+        /Treasury\s+obligations[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /U\.?S\.?\s+Treasury.*?([0-9,]+\.?\d{0,2})/i,
+        /Interest.*?Treasury.*?obligations.*?([0-9,]+\.?\d{0,2})/i,
+        // Position-based patterns
+        /(?:^|\n)\s*3[:\s]*([0-9,]+\.?\d{0,2})/m,
+        // Fallback patterns
+        /(?:Treasury|Treasuiy).*?obligations.*?([0-9,]+\.?\d{0,2})/i,
+        // Savings bonds patterns
+        /(?:U\.?S\.?\s+)?savings\s+bonds.*?([0-9,]+\.?\d{0,2})/i
+      ]
+    },
+    
+    // Box 4: Federal Income Tax Withheld
+    federalTaxWithheld: {
+      boxNumber: 4,
+      label: 'Federal Income Tax Withheld',
+      required: false,
+      patterns: [
+        // Primary patterns
+        /(?:Box\s*4|4\.?\s*Federal\s+income\s+tax\s+withheld)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Federal\s+income\s+tax\s+withheld[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /4\s+Federal\s+income\s+tax[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns
+        /(?:Box\s*[4A]|[4A]\.?\s*Federal\s+income)[:\s]*\$?\s*([0-9,OA]+\.?\d{0,2})/i,
+        // Enhanced patterns
+        /Tax\s+withheld[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Backup\s+withholding[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Federal.*?tax.*?withheld.*?([0-9,]+\.?\d{0,2})/i,
+        // Position-based patterns
+        /(?:^|\n)\s*4[:\s]*([0-9,]+\.?\d{0,2})/m
+      ]
+    },
+    
+    // Box 5: Investment Expenses
+    investmentExpenses: {
+      boxNumber: 5,
+      label: 'Investment Expenses',
+      required: false,
+      patterns: [
+        // Primary patterns
+        /(?:Box\s*5|5\.?\s*Investment\s+expenses)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Investment\s+expenses[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /5\s+Investment\s+expenses[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns
+        /(?:Box\s*[5S]|[5S]\.?\s*Investment)[:\s]*\$?\s*([0-9,OS]+\.?\d{0,2})/i,
+        // Enhanced patterns
+        /REMIC\s+expenses[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Investment.*?expenses.*?([0-9,]+\.?\d{0,2})/i,
+        // Position-based patterns
+        /(?:^|\n)\s*5[:\s]*([0-9,]+\.?\d{0,2})/m
+      ]
+    },
+    
+    // Box 6: Foreign Tax Paid (CRITICAL - was showing $8 instead of higher amount)
+    foreignTaxPaid: {
+      boxNumber: 6,
+      label: 'Foreign Tax Paid',
+      required: false,
+      patterns: [
+        // Primary patterns with enhanced matching
+        /(?:Box\s*6|6\.?\s*Foreign\s+tax\s+paid)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Foreign\s+tax\s+paid[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /6\s+Foreign\s+tax[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns
+        /(?:Box\s*[6G]|[6G]\.?\s*Foreign\s+tax)[:\s]*\$?\s*([0-9,OG]+\.?\d{0,2})/i,
+        // Enhanced patterns for better accuracy
+        /Foreign.*?tax.*?paid.*?([0-9,]+\.?\d{0,2})/i,
+        /(?:Foreign|Forelgn).*?tax.*?([0-9,]+\.?\d{0,2})/i,
+        // Position-based patterns
+        /(?:^|\n)\s*6[:\s]*([0-9,]+\.?\d{0,2})/m,
+        // Table-based patterns
+        /tax.*?paid.*?([0-9,]+\.\d{2})/i,
+        // International tax patterns
+        /foreign.*?withholding.*?([0-9,]+\.?\d{0,2})/i
+      ]
+    },
+    
+    // Box 7: Foreign Country or U.S. Territory
+    foreignCountry: {
+      boxNumber: 7,
+      label: 'Foreign Country or U.S. Territory',
+      required: false,
+      patterns: [
+        /(?:Box\s*7|7\.?\s*Foreign\s+country)[:\s]*([A-Za-z\s]+)/i,
+        /Foreign\s+country[:\s]*([A-Za-z\s]+)/i,
+        /(?:^|\n)\s*7[:\s]*([A-Za-z\s]+)/m
+      ]
+    },
+    
+    // Box 8: Tax-Exempt Interest
+    taxExemptInterest: {
+      boxNumber: 8,
+      label: 'Tax-Exempt Interest',
+      required: false,
+      patterns: [
+        // Primary patterns
+        /(?:Box\s*8|8\.?\s*Tax-exempt\s+interest)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Tax-exempt\s+interest[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /8\s+Tax-exempt[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns
+        /(?:Box\s*[8B]|[8B]\.?\s*Tax-exempt)[:\s]*\$?\s*([0-9,OB]+\.?\d{0,2})/i,
+        // Enhanced patterns
+        /Municipal\s+bond\s+interest[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Tax.*?exempt.*?interest.*?([0-9,]+\.?\d{0,2})/i,
+        // Position-based patterns
+        /(?:^|\n)\s*8[:\s]*([0-9,]+\.?\d{0,2})/m
+      ]
+    },
+    
+    // Box 9: Specified Private Activity Bond Interest
+    specifiedPrivateActivityBond: {
+      boxNumber: 9,
+      label: 'Specified Private Activity Bond Interest',
+      required: false,
+      patterns: [
+        // Primary patterns
+        /(?:Box\s*9|9\.?\s*Specified\s+private\s+activity)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Specified\s+private\s+activity\s+bond[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /9\s+Specified\s+private[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns
+        /(?:Box\s*[9g]|[9g]\.?\s*Specified\s+private)[:\s]*\$?\s*([0-9,Og]+\.?\d{0,2})/i,
+        // Enhanced patterns
+        /Private\s+activity\s+bond[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Specified.*?private.*?activity.*?([0-9,]+\.?\d{0,2})/i,
+        // Position-based patterns
+        /(?:^|\n)\s*9[:\s]*([0-9,]+\.?\d{0,2})/m
+      ]
+    },
+    
+    // Box 10: Market Discount (MISSING FIELD - $800)
+    marketDiscount: {
+      boxNumber: 10,
+      label: 'Market Discount',
+      required: false,
+      patterns: [
+        // Primary patterns
+        /(?:Box\s*10|10\.?\s*Market\s+discount)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Market\s+discount[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /10\s+Market\s+discount[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns
+        /(?:Box\s*[1l][0O]|[1l][0O]\.?\s*Market)[:\s]*\$?\s*([0-9,OlI]+\.?\d{0,2})/i,
+        // Enhanced patterns
+        /Market.*?discount.*?([0-9,]+\.?\d{0,2})/i,
+        /Accrued.*?market.*?discount.*?([0-9,]+\.?\d{0,2})/i,
+        // Position-based patterns
+        /(?:^|\n)\s*10[:\s]*([0-9,]+\.?\d{0,2})/m,
+        // Bond-related patterns
+        /bond.*?market.*?discount.*?([0-9,]+\.?\d{0,2})/i
+      ]
+    },
+    
+    // Box 11: Bond Premium (MISSING FIELD - $700)
+    bondPremium: {
+      boxNumber: 11,
+      label: 'Bond Premium',
+      required: false,
+      patterns: [
+        // Primary patterns
+        /(?:Box\s*11|11\.?\s*Bond\s+premium)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Bond\s+premium[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /11\s+Bond\s+premium[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns
+        /(?:Box\s*[1l][1l]|[1l][1l]\.?\s*Bond)[:\s]*\$?\s*([0-9,OlI]+\.?\d{0,2})/i,
+        // Enhanced patterns
+        /Bond.*?premium.*?([0-9,]+\.?\d{0,2})/i,
+        /Premium.*?amortization.*?([0-9,]+\.?\d{0,2})/i,
+        // Position-based patterns
+        /(?:^|\n)\s*11[:\s]*([0-9,]+\.?\d{0,2})/m,
+        // Amortization patterns
+        /amortizable.*?bond.*?premium.*?([0-9,]+\.?\d{0,2})/i
+      ]
+    },
+    
+    // Box 12: Bond Premium on Treasury Obligations
+    bondPremiumTreasury: {
+      boxNumber: 12,
+      label: 'Bond Premium on Treasury Obligations',
+      required: false,
+      patterns: [
+        // Primary patterns
+        /(?:Box\s*12|12\.?\s*Bond\s+premium\s+on\s+Treasury)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Bond\s+premium\s+on\s+Treasury\s+obligations[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /12\s+Bond\s+premium\s+on\s+Treasury[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns
+        /(?:Box\s*[1l][2Z]|[1l][2Z]\.?\s*Bond\s+premium\s+on)[:\s]*\$?\s*([0-9,OlIZ]+\.?\d{0,2})/i,
+        // Enhanced patterns
+        /Bond.*?premium.*?Treasury.*?([0-9,]+\.?\d{0,2})/i,
+        /Treasury.*?bond.*?premium.*?([0-9,]+\.?\d{0,2})/i,
+        // Position-based patterns
+        /(?:^|\n)\s*12[:\s]*([0-9,]+\.?\d{0,2})/m
+      ]
+    },
+    
+    // Box 13: Bond Premium on Tax-Exempt Bond
+    bondPremiumTaxExempt: {
+      boxNumber: 13,
+      label: 'Bond Premium on Tax-Exempt Bond',
+      required: false,
+      patterns: [
+        // Primary patterns
+        /(?:Box\s*13|13\.?\s*Bond\s+premium\s+on\s+tax-exempt)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /Bond\s+premium\s+on\s+tax-exempt\s+bond[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        /13\s+Bond\s+premium\s+on\s+tax-exempt[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
+        // OCR error patterns
+        /(?:Box\s*[1l][3E]|[1l][3E]\.?\s*Bond\s+premium\s+on\s+tax)[:\s]*\$?\s*([0-9,OlIE]+\.?\d{0,2})/i,
+        // Enhanced patterns
+        /Bond.*?premium.*?tax.*?exempt.*?([0-9,]+\.?\d{0,2})/i,
+        /Tax.*?exempt.*?bond.*?premium.*?([0-9,]+\.?\d{0,2})/i,
+        // Position-based patterns
+        /(?:^|\n)\s*13[:\s]*([0-9,]+\.?\d{0,2})/m
+      ]
+    },
+    
+    // Box 14: Tax-Exempt and Tax Credit Bond CUSIP No.
+    cusipNumber: {
+      boxNumber: 14,
+      label: 'Tax-Exempt and Tax Credit Bond CUSIP No.',
+      required: false,
+      patterns: [
+        /(?:Box\s*14|14\.?\s*CUSIP)[:\s]*([A-Z0-9]+)/i,
+        /CUSIP[:\s]*([A-Z0-9]+)/i,
+        /(?:^|\n)\s*14[:\s]*([A-Z0-9]+)/m
+      ]
+    }
+  };
 
   constructor(config: AzureDocumentIntelligenceConfig) {
     this.config = config;
@@ -34,1692 +321,405 @@ export class AzureDocumentIntelligenceService {
     );
   }
 
+  /**
+   * Main extraction method that prioritizes OCR-based extraction
+   */
   async extractDataFromDocument(
     documentPathOrBuffer: string | Buffer,
     documentType: string
   ): Promise<ExtractedFieldData> {
     try {
-      console.log('🔍 [Azure DI] Processing document with Azure Document Intelligence...');
-      console.log('🔍 [Azure DI] Initial document type:', documentType);
+      console.log('🔍 [Azure DI] Starting aggressive OCR-based extraction...');
       
-      // Get document buffer - either from file path or use provided buffer
+      // Get document buffer
       const documentBuffer = typeof documentPathOrBuffer === 'string' 
         ? await readFile(documentPathOrBuffer)
         : documentPathOrBuffer;
       
-      // Apply advanced OCR preprocessing
-      const preprocessedBuffer = await this.preprocessDocumentForOCR(documentBuffer);
+      // Always use OCR-first approach for 1099-INT
+      const poller = await this.client.beginAnalyzeDocument('prebuilt-read', documentBuffer);
+      const result = await poller.pollUntilDone();
       
-      // Determine the model to use based on document type
-      const modelId = this.getModelIdForDocumentType(documentType);
-      console.log('🔍 [Azure DI] Using model:', modelId);
+      console.log('✅ [Azure DI] OCR analysis completed');
       
-      let extractedData: ExtractedFieldData;
-      let correctedDocumentType: DocumentType | undefined;
+      // Extract full text
+      const fullText = result.content || '';
       
-      try {
-        // Analyze the document with specific tax model
-        const poller = await this.client.beginAnalyzeDocument(modelId, preprocessedBuffer);
-        const result = await poller.pollUntilDone();
-        
-        console.log('✅ [Azure DI] Document analysis completed with tax model');
-        
-        // Extract the data based on document type with enhanced processing
-        extractedData = await this.extractTaxDocumentFieldsEnhanced(result, documentType);
-        
-        // Perform OCR-based document type correction if we have OCR text
-        if (extractedData.fullText) {
-          const ocrBasedType = this.analyzeDocumentTypeFromOCR(extractedData.fullText as string);
-          if (ocrBasedType !== 'UNKNOWN' && ocrBasedType !== documentType) {
-            console.log(`🔄 [Azure DI] Document type correction: ${documentType} → ${ocrBasedType}`);
-            
-            // Convert string to DocumentType enum with validation
-            if (Object.values(DocumentType).includes(ocrBasedType as DocumentType)) {
-              correctedDocumentType = ocrBasedType as DocumentType;
-              
-              // Re-extract data with the corrected document type
-              console.log('🔍 [Azure DI] Re-extracting data with corrected document type...');
-              extractedData = await this.extractTaxDocumentFieldsEnhanced(result, ocrBasedType);
-            } else {
-              console.log(`⚠️ [Azure DI] Invalid document type detected: ${ocrBasedType}, ignoring correction`);
-            }
-          }
-        }
-        
-      } catch (modelError: any) {
-        console.warn('⚠️ [Azure DI] Tax model failed, attempting fallback to OCR model:', modelError?.message);
-        
-        // Check if it's a ModelNotFound error
-        if (modelError?.message?.includes('ModelNotFound') || 
-            modelError?.message?.includes('Resource not found') ||
-            modelError?.code === 'NotFound') {
-          
-          console.log('🔍 [Azure DI] Falling back to prebuilt-read model for OCR extraction...');
-          
-          // Fallback to general OCR model
-          const fallbackPoller = await this.client.beginAnalyzeDocument('prebuilt-read', preprocessedBuffer);
-          const fallbackResult = await fallbackPoller.pollUntilDone();
-          
-          console.log('✅ [Azure DI] Document analysis completed with OCR fallback');
-          
-          // Extract data using enhanced OCR-based approach
-          extractedData = await this.extractTaxDocumentFieldsFromOCREnhanced(fallbackResult, documentType);
-          
-          // Perform OCR-based document type correction
-          if (extractedData.fullText) {
-            const ocrBasedType = this.analyzeDocumentTypeFromOCR(extractedData.fullText as string);
-            if (ocrBasedType !== 'UNKNOWN' && ocrBasedType !== documentType) {
-              console.log(`🔄 [Azure DI] Document type correction (OCR fallback): ${documentType} → ${ocrBasedType}`);
-              
-              // Convert string to DocumentType enum with validation
-              if (Object.values(DocumentType).includes(ocrBasedType as DocumentType)) {
-                correctedDocumentType = ocrBasedType as DocumentType;
-                
-                // Re-extract data with the corrected document type
-                console.log('🔍 [Azure DI] Re-extracting data with corrected document type...');
-                extractedData = await this.extractTaxDocumentFieldsFromOCREnhanced(fallbackResult, ocrBasedType);
-              } else {
-                console.log(`⚠️ [Azure DI] Invalid document type detected: ${ocrBasedType}, ignoring correction`);
-              }
-            }
-          }
-        } else {
-          // Re-throw if it's not a model availability issue
-          throw modelError;
-        }
+      // For 1099-INT, use aggressive OCR-based extraction
+      if (documentType === 'FORM_1099_INT') {
+        return this.extract1099IntFieldsAggressively(fullText);
       }
       
-      // Add the corrected document type to the result if it was changed
-      if (correctedDocumentType) {
-        extractedData.correctedDocumentType = correctedDocumentType;
-      }
+      // Fallback for other document types
+      return this.extractGenericFields(fullText);
       
-      return extractedData;
     } catch (error: any) {
       console.error('❌ [Azure DI] Processing error:', error);
-      throw new Error(`Azure Document Intelligence processing failed: ${error?.message || 'Unknown error'}`);
+      return {
+        extractionWarnings: [`Azure Document Intelligence processing failed: ${error?.message || 'Unknown error'}`],
+        confidence: 0
+      };
     }
   }
 
   /**
-   * Advanced OCR preprocessing to improve text recognition accuracy
+   * Aggressive 1099-INT field extraction using comprehensive regex patterns
    */
-  private async preprocessDocumentForOCR(documentBuffer: Buffer): Promise<Buffer> {
-    // For now, return the original buffer
-    // In a full implementation, this would apply image enhancement techniques:
-    // - Noise reduction
-    // - Contrast enhancement
-    // - Deskewing
-    // - Resolution optimization
-    return documentBuffer;
-  }
-
-  /**
-   * Enhanced tax document field extraction with improved accuracy
-   */
-  private async extractTaxDocumentFieldsEnhanced(result: any, documentType: string): Promise<ExtractedFieldData> {
-    const extractedData: ExtractedFieldData = {};
+  private extract1099IntFieldsAggressively(ocrText: string): ExtractedFieldData {
+    console.log('🔍 [Azure DI] Starting aggressive 1099-INT field extraction...');
     
-    // Extract text content
-    extractedData.fullText = result.content || '';
+    const extractedData: ExtractedFieldData = {
+      fullText: ocrText,
+      extractionWarnings: [],
+      confidence: 0.9, // High confidence for OCR-based extraction
+      fieldConfidences: {}
+    };
     
-    // Extract form fields with enhanced processing
-    if (result.documents && result.documents.length > 0) {
-      const document = result.documents[0];
+    // Preprocess OCR text to handle common OCR errors
+    const preprocessedText = this.preprocessOCRTextForExtraction(ocrText);
+    
+    let fieldsExtracted = 0;
+    const totalFields = Object.keys(this.FORM_1099_INT_FIELDS).length;
+    
+    // Extract each field using comprehensive regex patterns
+    for (const [fieldName, fieldConfig] of Object.entries(this.FORM_1099_INT_FIELDS)) {
+      const extractedValue = this.extractFieldByRegex(preprocessedText, fieldConfig.patterns, fieldName);
       
-      if (document.fields) {
-        // Process fields based on document type with enhanced methods
-        switch (documentType) {
-          case 'W2':
-            return this.processW2FieldsEnhanced(document.fields, extractedData, result);
-          case 'FORM_1099_INT':
-            return await this.process1099IntFieldsEnhanced(document.fields, extractedData, result);
-          case 'FORM_1099_DIV':
-            return this.process1099DivFieldsEnhanced(document.fields, extractedData, result);
-          case 'FORM_1099_MISC':
-            return this.process1099MiscFieldsEnhanced(document.fields, extractedData, result);
-          case 'FORM_1099_NEC':
-            return this.process1099NecFieldsEnhanced(document.fields, extractedData, result);
-          default:
-            return this.processGenericFieldsEnhanced(document.fields, extractedData, result);
+      if (extractedValue !== null && extractedValue !== undefined) {
+        // Handle different field types
+        if (fieldName === 'foreignCountry' || fieldName === 'cusipNumber') {
+          extractedData[fieldName] = String(extractedValue).trim();
+          extractedData.fieldConfidences![fieldName] = 0.85;
+        } else {
+          const numericValue = this.parseAmountRobustly(extractedValue);
+          if (numericValue > 0) {
+            extractedData[fieldName] = numericValue;
+            extractedData.fieldConfidences![fieldName] = 0.9;
+            fieldsExtracted++;
+            console.log(`✅ [Azure DI] Extracted ${fieldName}: $${numericValue} (Box ${fieldConfig.boxNumber})`);
+          }
         }
       }
     }
     
-    // Extract key-value pairs from tables if available
-    if (result.keyValuePairs) {
-      for (const kvp of result.keyValuePairs) {
-        const key = kvp.key?.content?.trim();
-        const value = kvp.value?.content?.trim();
-        if (key && value) {
-          extractedData[key] = value;
-        }
+    // Extract personal information
+    const personalInfo = this.extractPersonalInformation(preprocessedText);
+    Object.assign(extractedData, personalInfo);
+    
+    // Calculate confidence based on extraction success
+    const extractionRate = fieldsExtracted / totalFields;
+    extractedData.confidence = Math.max(0.5, 0.7 + (extractionRate * 0.3));
+    
+    // Add warnings for missing critical fields
+    const warnings: string[] = [];
+    const criticalFields = ['interestIncome', 'earlyWithdrawalPenalty', 'interestOnUSavingsBonds', 'foreignTaxPaid', 'marketDiscount', 'bondPremium'];
+    
+    for (const field of criticalFields) {
+      if (!extractedData[field] || extractedData[field] === 0) {
+        warnings.push(`Missing or zero value for critical field: ${field}`);
       }
     }
+    
+    extractedData.extractionWarnings = warnings;
+    
+    console.log(`✅ [Azure DI] Aggressive extraction completed. Fields extracted: ${fieldsExtracted}/${totalFields}, Confidence: ${extractedData.confidence}`);
     
     return extractedData;
   }
 
   /**
-   * Enhanced OCR-based field extraction with improved accuracy
+   * Extract field value using multiple regex patterns with fallback
    */
-  private async extractTaxDocumentFieldsFromOCREnhanced(result: any, documentType: string): Promise<ExtractedFieldData> {
-    console.log('🔍 [Azure DI] Extracting tax document fields using enhanced OCR fallback...');
-    
-    const extractedData: ExtractedFieldData = {};
-    
-    // Extract text content from OCR result
-    extractedData.fullText = result.content || '';
-    
-    // Use enhanced OCR-based extraction methods for different document types
-    switch (documentType) {
-      case 'W2':
-        return this.extractW2FieldsFromOCREnhanced(extractedData.fullText as string, extractedData, result);
-      case 'FORM_1099_INT':
-        return await this.extract1099IntFieldsFromOCREnhanced(extractedData.fullText as string, extractedData, result);
-      case 'FORM_1099_DIV':
-        return this.extract1099DivFieldsFromOCREnhanced(extractedData.fullText as string, extractedData, result);
-      case 'FORM_1099_MISC':
-        return this.extract1099MiscFieldsFromOCREnhanced(extractedData.fullText as string, extractedData, result);
-      case 'FORM_1099_NEC':
-        return this.extract1099NecFieldsFromOCREnhanced(extractedData.fullText as string, extractedData, result);
-      default:
-        console.log('🔍 [Azure DI] Using enhanced generic OCR extraction for document type:', documentType);
-        return this.extractGenericFieldsFromOCREnhanced(extractedData.fullText as string, extractedData, result);
-    }
-  }
-
-  /**
-   * ENHANCED 1099-INT FIELD EXTRACTION - 98-100% ACCURACY TARGET
-   * Combines structured extraction, advanced OCR patterns, cross-field validation,
-   * auto-correction algorithms, and confidence scoring
-   */
-  private async process1099IntFieldsEnhanced(fields: any, baseData: ExtractedFieldData, result: any): Promise<ExtractedFieldData> {
-    console.log('🚀 [Azure DI] Starting enhanced 1099-INT field extraction...');
-    
-    const data = { ...baseData };
-    const fieldConfidences: { [key: string]: number } = {};
-    const extractionResults: { [key: string]: FieldExtractionResult } = {};
-    
-    // Step 1: Extract from structured fields with confidence tracking
-    const structuredResults = this.extractStructured1099IntFields(fields);
-    Object.assign(extractionResults, structuredResults);
-    
-    // Step 2: Extract from OCR with enhanced patterns
-    const ocrResults = await this.extractOCR1099IntFieldsAdvanced(baseData.fullText as string, result);
-    
-    // Step 3: Cross-field validation and correction
-    const validatedResults = this.validateAndCorrect1099IntFields(extractionResults, ocrResults);
-    
-    // Step 4: Apply auto-correction algorithms
-    const correctedResults = this.applyAutoCorrection1099Int(validatedResults, baseData.fullText as string);
-    
-    // Step 5: Calculate confidence scores and select best values
-    for (const [fieldName, extractionResult] of Object.entries(correctedResults)) {
-      const confidence = this.calculateFieldConfidence(extractionResult, fieldName, baseData.fullText as string);
-      fieldConfidences[fieldName] = confidence;
-      data[fieldName] = extractionResult.value;
+  private extractFieldByRegex(text: string, patterns: RegExp[], fieldName: string): any {
+    for (let i = 0; i < patterns.length; i++) {
+      const pattern = patterns[i];
+      const match = text.match(pattern);
       
-      console.log(`✅ [Azure DI] ${fieldName}: ${extractionResult.value} (confidence: ${confidence.toFixed(2)}, source: ${extractionResult.source})`);
-    }
-    
-    // Step 6: OCR fallback for personal info if not found in structured fields
-    if ((!data.recipientName || !data.recipientTIN || !data.recipientAddress || !data.payerName || !data.payerTIN) && baseData.fullText) {
-      console.log('🔍 [Azure DI] Some 1099-INT info missing, attempting enhanced OCR extraction...');
-      const personalInfoFromOCR = this.extract1099InfoFromOCREnhanced(baseData.fullText as string);
-      
-      if (!data.recipientName && personalInfoFromOCR.name) {
-        data.recipientName = personalInfoFromOCR.name;
-        fieldConfidences.recipientName = 0.85;
-        console.log('✅ [Azure DI] Extracted recipient name from OCR:', data.recipientName);
-      }
-      
-      if (!data.recipientTIN && personalInfoFromOCR.tin) {
-        data.recipientTIN = personalInfoFromOCR.tin;
-        fieldConfidences.recipientTIN = 0.90;
-        console.log('✅ [Azure DI] Extracted recipient TIN from OCR:', data.recipientTIN);
-      }
-      
-      if (!data.recipientAddress && personalInfoFromOCR.address) {
-        data.recipientAddress = personalInfoFromOCR.address;
-        fieldConfidences.recipientAddress = 0.80;
-        console.log('✅ [Azure DI] Extracted recipient address from OCR:', data.recipientAddress);
-      }
-      
-      if (!data.payerName && personalInfoFromOCR.payerName) {
-        data.payerName = personalInfoFromOCR.payerName;
-        fieldConfidences.payerName = 0.85;
-        console.log('✅ [Azure DI] Extracted payer name from OCR:', data.payerName);
-      }
-      
-      if (!data.payerTIN && personalInfoFromOCR.payerTIN) {
-        data.payerTIN = personalInfoFromOCR.payerTIN;
-        fieldConfidences.payerTIN = 0.90;
-        console.log('✅ [Azure DI] Extracted payer TIN from OCR:', data.payerTIN);
-      }
-    }
-    
-    // Step 7: Calculate overall confidence score
-    const overallConfidence = this.calculateOverallConfidence(fieldConfidences);
-    data.confidence = overallConfidence;
-    data.fieldConfidences = fieldConfidences;
-    
-    console.log(`🎯 [Azure DI] Enhanced 1099-INT extraction completed with ${overallConfidence.toFixed(2)}% confidence`);
-    
-    return data;
-  }
-
-  /**
-   * Extract structured 1099-INT fields with confidence tracking
-   */
-  private extractStructured1099IntFields(fields: any): { [key: string]: FieldExtractionResult } {
-    const results: { [key: string]: FieldExtractionResult } = {};
-    
-    const fieldMappings = {
-      'Payer.Name': 'payerName',
-      'Payer.TIN': 'payerTIN',
-      'Payer.Address': 'payerAddress',
-      'Recipient.Name': 'recipientName',
-      'Recipient.TIN': 'recipientTIN',
-      'Recipient.Address': 'recipientAddress',
-      'InterestIncome': 'interestIncome',
-      'EarlyWithdrawalPenalty': 'earlyWithdrawalPenalty',
-      'InterestOnUSTreasuryObligations': 'interestOnUSavingsBonds',
-      'FederalIncomeTaxWithheld': 'federalTaxWithheld',
-      'InvestmentExpenses': 'investmentExpenses',
-      'ForeignTaxPaid': 'foreignTaxPaid',
-      'TaxExemptInterest': 'taxExemptInterest',
-      'SpecifiedPrivateActivityBondInterest': 'privateActivityBondInterest'
-    };
-    
-    for (const [azureFieldName, mappedFieldName] of Object.entries(fieldMappings)) {
-      if (fields[azureFieldName]?.value !== undefined) {
-        const fieldData = fields[azureFieldName];
-        const value = typeof fieldData.value === 'number' ? fieldData.value : this.parseAmountAdvanced(fieldData.value);
-        const confidence = fieldData.confidence || 0.7;
-        const boundingBox = fieldData.boundingRegions?.[0]?.polygon || [];
-        
-        results[mappedFieldName] = {
-          value,
-          confidence,
-          source: 'structured',
-          boundingBox
-        };
-      }
-    }
-    
-    return results;
-  }
-
-  /**
-   * Advanced OCR extraction for 1099-INT fields with enhanced regex patterns
-   */
-  private async extractOCR1099IntFieldsAdvanced(ocrText: string, result: any): Promise<{ [key: string]: FieldExtractionResult }> {
-    const results: { [key: string]: FieldExtractionResult } = {};
-    
-    // Enhanced regex patterns for 1099-INT fields with multiple variations
-    const fieldPatterns = {
-      interestIncome: [
-        // Box 1 - Interest income patterns
-        /(?:Box\s*1|1\.?\s*Interest\s+income|Interest\s+income)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:1\s*Interest\s+income)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:Interest\s+income)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*1\s+([0-9,]+\.?\d{0,2})\s*(?:\n|$)/m,
-        /(?:Box\s*1)[^0-9]*([0-9,]+\.?\d{0,2})/i
-      ],
-      earlyWithdrawalPenalty: [
-        // Box 2 - Early withdrawal penalty patterns
-        /(?:Box\s*2|2\.?\s*Early\s+withdrawal\s+penalty|Early\s+withdrawal\s+penalty)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:2\s*Early\s+withdrawal\s+penalty)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:Early\s+withdrawal\s+penalty)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*2\s+([0-9,]+\.?\d{0,2})\s*(?:\n|$)/m
-      ],
-      interestOnUSavingsBonds: [
-        // Box 3 - Interest on U.S. Savings Bonds patterns
-        /(?:Box\s*3|3\.?\s*Interest\s+on\s+U\.?S\.?\s+(?:Treasury\s+obligations|Savings\s+Bonds)|Interest\s+on\s+U\.?S\.?\s+(?:Treasury\s+obligations|Savings\s+Bonds))[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:3\s*Interest\s+on\s+U\.?S\.?\s+(?:Treasury\s+obligations|Savings\s+Bonds))[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:Interest\s+on\s+U\.?S\.?\s+(?:Treasury\s+obligations|Savings\s+Bonds))[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*3\s+([0-9,]+\.?\d{0,2})\s*(?:\n|$)/m
-      ],
-      federalTaxWithheld: [
-        // Box 4 - Federal income tax withheld patterns
-        /(?:Box\s*4|4\.?\s*Federal\s+income\s+tax\s+withheld|Federal\s+income\s+tax\s+withheld)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:4\s*Federal\s+income\s+tax\s+withheld)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:Federal\s+income\s+tax\s+withheld)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*4\s+([0-9,]+\.?\d{0,2})\s*(?:\n|$)/m
-      ],
-      investmentExpenses: [
-        // Box 5 - Investment expenses patterns
-        /(?:Box\s*5|5\.?\s*Investment\s+expenses|Investment\s+expenses)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:5\s*Investment\s+expenses)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:Investment\s+expenses)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*5\s+([0-9,]+\.?\d{0,2})\s*(?:\n|$)/m
-      ],
-      foreignTaxPaid: [
-        // Box 6 - Foreign tax paid patterns
-        /(?:Box\s*6|6\.?\s*Foreign\s+tax\s+paid|Foreign\s+tax\s+paid)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:6\s*Foreign\s+tax\s+paid)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:Foreign\s+tax\s+paid)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*6\s+([0-9,]+\.?\d{0,2})\s*(?:\n|$)/m
-      ],
-      taxExemptInterest: [
-        // Box 8 - Tax-exempt interest patterns
-        /(?:Box\s*8|8\.?\s*Tax-exempt\s+interest|Tax-exempt\s+interest)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:8\s*Tax-exempt\s+interest)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:Tax-exempt\s+interest)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*8\s+([0-9,]+\.?\d{0,2})\s*(?:\n|$)/m
-      ],
-      privateActivityBondInterest: [
-        // Box 9 - Specified private activity bond interest patterns
-        /(?:Box\s*9|9\.?\s*Specified\s+private\s+activity\s+bond\s+interest|Specified\s+private\s+activity\s+bond\s+interest)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:9\s*Specified\s+private\s+activity\s+bond\s+interest)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:Specified\s+private\s+activity\s+bond\s+interest)[:\s]*\$?\s*([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*9\s+([0-9,]+\.?\d{0,2})\s*(?:\n|$)/m
-      ]
-    };
-    
-    // Extract each field using multiple patterns
-    for (const [fieldName, patterns] of Object.entries(fieldPatterns)) {
-      let bestMatch: FieldExtractionResult | null = null;
-      let highestConfidence = 0;
-      
-      for (const pattern of patterns) {
-        const match = ocrText.match(pattern);
-        if (match && match[1]) {
-          const value = this.parseAmountAdvanced(match[1]);
-          if (value > 0) {
-            // Calculate confidence based on pattern specificity and context
-            const confidence = this.calculatePatternConfidence(pattern, match, ocrText);
-            
-            if (confidence > highestConfidence) {
-              highestConfidence = confidence;
-              bestMatch = {
-                value,
-                confidence,
-                source: 'ocr',
-                boundingBox: this.findFieldBoundingBox(match[0], ocrText, result)
-              };
-            }
-          }
-        }
-      }
-      
-      if (bestMatch) {
-        results[fieldName] = bestMatch;
-        console.log(`✅ [Azure DI OCR] Found ${fieldName}: $${bestMatch.value} (confidence: ${bestMatch.confidence.toFixed(2)})`);
-      }
-    }
-    
-    return results;
-  }
-
-  /**
-   * Cross-field validation and correction for 1099-INT
-   */
-  private validateAndCorrect1099IntFields(
-    structuredResults: { [key: string]: FieldExtractionResult },
-    ocrResults: { [key: string]: FieldExtractionResult }
-  ): { [key: string]: FieldExtractionResult } {
-    const correctedResults: { [key: string]: FieldExtractionResult } = {};
-    
-    // Get all unique field names
-    const allFields = new Set([...Object.keys(structuredResults), ...Object.keys(ocrResults)]);
-    
-    for (const fieldName of allFields) {
-      const structuredResult = structuredResults[fieldName];
-      const ocrResult = ocrResults[fieldName];
-      
-      if (structuredResult && ocrResult) {
-        // Both sources have data - choose the more reliable one
-        const structuredValue = this.parseAmountAdvanced(structuredResult.value);
-        const ocrValue = this.parseAmountAdvanced(ocrResult.value);
-        
-        // If values are very close (within $10), prefer structured
-        if (Math.abs(structuredValue - ocrValue) <= 10) {
-          correctedResults[fieldName] = {
-            ...structuredResult,
-            confidence: Math.max(structuredResult.confidence, ocrResult.confidence)
-          };
-        }
-        // If values differ significantly, choose the one with higher confidence
-        else if (structuredResult.confidence > ocrResult.confidence) {
-          correctedResults[fieldName] = structuredResult;
-        } else {
-          correctedResults[fieldName] = ocrResult;
-        }
-      } else if (structuredResult) {
-        correctedResults[fieldName] = structuredResult;
-      } else if (ocrResult) {
-        correctedResults[fieldName] = ocrResult;
-      }
-    }
-    
-    return correctedResults;
-  }
-
-  /**
-   * Apply auto-correction algorithms for 1099-INT
-   */
-  private applyAutoCorrection1099Int(
-    results: { [key: string]: FieldExtractionResult },
-    ocrText: string
-  ): { [key: string]: FieldExtractionResult } {
-    const correctedResults = { ...results };
-    
-    // Auto-correction rule 1: Interest income should be the largest amount typically
-    const interestIncome = this.parseAmountAdvanced(results.interestIncome?.value);
-    const federalTaxWithheld = this.parseAmountAdvanced(results.federalTaxWithheld?.value);
-    
-    // If federal tax withheld is larger than interest income, they might be swapped
-    if (federalTaxWithheld > 0 && interestIncome > 0 && federalTaxWithheld > interestIncome * 2) {
-      console.log('🔧 [Azure DI] Potential field swap detected: Interest Income ↔ Federal Tax Withheld');
-      
-      // Verify by looking for contextual clues in OCR text
-      const interestContext = /(?:interest\s+income|box\s*1)[^0-9]*([0-9,]+\.?\d{0,2})/i.exec(ocrText);
-      const taxContext = /(?:federal\s+income\s+tax\s+withheld|box\s*4)[^0-9]*([0-9,]+\.?\d{0,2})/i.exec(ocrText);
-      
-      if (interestContext && taxContext) {
-        const contextInterest = this.parseAmountAdvanced(interestContext[1]);
-        const contextTax = this.parseAmountAdvanced(taxContext[1]);
-        
-        if (Math.abs(contextInterest - federalTaxWithheld) < Math.abs(contextInterest - interestIncome)) {
-          // Swap the values
-          correctedResults.interestIncome = {
-            ...results.federalTaxWithheld!,
-            source: 'corrected'
-          };
-          correctedResults.federalTaxWithheld = {
-            ...results.interestIncome!,
-            source: 'corrected'
-          };
-          console.log('✅ [Azure DI] Applied auto-correction: Swapped Interest Income and Federal Tax Withheld');
-        }
-      }
-    }
-    
-    // Auto-correction rule 2: Validate reasonable ranges
-    for (const [fieldName, result] of Object.entries(correctedResults)) {
-      const value = this.parseAmountAdvanced(result.value);
-      
-      // Flag unreasonably large values (over $1M) for manual review
-      if (value > 1000000) {
-        console.log(`⚠️ [Azure DI] Unusually large value detected for ${fieldName}: $${value}`);
-        correctedResults[fieldName] = {
-          ...result,
-          confidence: Math.min(result.confidence, 0.5) // Reduce confidence
-        };
-      }
-      
-      // Flag negative values (should not exist in 1099-INT)
-      if (value < 0) {
-        console.log(`⚠️ [Azure DI] Negative value detected for ${fieldName}: $${value}`);
-        correctedResults[fieldName] = {
-          ...result,
-          value: Math.abs(value), // Convert to positive
-          confidence: Math.min(result.confidence, 0.6),
-          source: 'corrected'
-        };
-      }
-    }
-    
-    return correctedResults;
-  }
-
-  /**
-   * Calculate field confidence based on extraction method and validation
-   */
-  private calculateFieldConfidence(result: FieldExtractionResult, fieldName: string, ocrText: string): number {
-    let confidence = result.confidence;
-    
-    // Boost confidence for structured extraction
-    if (result.source === 'structured') {
-      confidence = Math.min(confidence + 0.1, 1.0);
-    }
-    
-    // Boost confidence if value appears multiple times in OCR
-    const value = result.value.toString();
-    const occurrences = (ocrText.match(new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
-    if (occurrences > 1) {
-      confidence = Math.min(confidence + 0.05, 1.0);
-    }
-    
-    // Reduce confidence for very small amounts (likely OCR errors)
-    const numericValue = this.parseAmountAdvanced(result.value);
-    if (numericValue > 0 && numericValue < 1) {
-      confidence = Math.max(confidence - 0.2, 0.1);
-    }
-    
-    return confidence;
-  }
-
-  /**
-   * Calculate pattern confidence based on regex specificity
-   */
-  private calculatePatternConfidence(pattern: RegExp, match: RegExpMatchArray, ocrText: string): number {
-    let confidence = 0.7; // Base confidence
-    
-    // Higher confidence for patterns that include "Box" numbers
-    if (pattern.source.includes('Box')) {
-      confidence += 0.15;
-    }
-    
-    // Higher confidence for patterns that include full field names
-    if (pattern.source.includes('Interest\\s+income') || 
-        pattern.source.includes('Federal\\s+income\\s+tax') ||
-        pattern.source.includes('Early\\s+withdrawal')) {
-      confidence += 0.1;
-    }
-    
-    // Higher confidence if the match is surrounded by whitespace or line breaks
-    const matchIndex = ocrText.indexOf(match[0]);
-    if (matchIndex > 0) {
-      const beforeChar = ocrText[matchIndex - 1];
-      const afterChar = ocrText[matchIndex + match[0].length];
-      if (/\s/.test(beforeChar) && /\s/.test(afterChar)) {
-        confidence += 0.05;
-      }
-    }
-    
-    return Math.min(confidence, 1.0);
-  }
-
-  /**
-   * Find bounding box for a field in the OCR result
-   */
-  private findFieldBoundingBox(matchText: string, ocrText: string, result: any): number[] {
-    // This would implement bounding box detection based on OCR result
-    // For now, return empty array
-    return [];
-  }
-
-  /**
-   * Calculate overall confidence score
-   */
-  private calculateOverallConfidence(fieldConfidences: { [key: string]: number }): number {
-    const confidenceValues = Object.values(fieldConfidences);
-    if (confidenceValues.length === 0) return 0;
-    
-    // Use weighted average with higher weight for critical fields
-    const criticalFields = ['interestIncome', 'federalTaxWithheld', 'recipientName', 'recipientTIN'];
-    let totalWeight = 0;
-    let weightedSum = 0;
-    
-    for (const [fieldName, confidence] of Object.entries(fieldConfidences)) {
-      const weight = criticalFields.includes(fieldName) ? 2 : 1;
-      totalWeight += weight;
-      weightedSum += confidence * weight;
-    }
-    
-    return totalWeight > 0 ? (weightedSum / totalWeight) * 100 : 0;
-  }
-
-  /**
-   * Enhanced 1099 info extraction from OCR with improved patterns
-   */
-  private extract1099InfoFromOCREnhanced(ocrText: string): {
-    name?: string;
-    tin?: string;
-    address?: string;
-    payerName?: string;
-    payerTIN?: string;
-    payerAddress?: string;
-  } {
-    console.log('🔍 [Azure DI OCR Enhanced] Searching for 1099 info in OCR text...');
-    
-    const info1099: { 
-      name?: string; 
-      tin?: string; 
-      address?: string;
-      payerName?: string;
-      payerTIN?: string;
-      payerAddress?: string;
-    } = {};
-    
-    // Enhanced recipient name patterns with better accuracy
-    const recipientNamePatterns = [
-      /(?:RECIPIENT'S?\s+name|Recipient'?s?\s+name)\s*\n([A-Za-z\s]+?)(?:\n|$)/i,
-      /(?:RECIPIENT'S?\s+NAME|Recipient'?s?\s+name)[:\s]+([A-Za-z\s]+?)(?:\s+\d|\n|RECIPIENT'S?\s+|Recipient'?s?\s+|TIN|address|street|$)/i,
-      /(?:RECIPIENT'S?\s+name|Recipient'?s?\s+name):\s*([A-Za-z\s]+?)(?:\n|RECIPIENT'S?\s+|Recipient'?s?\s+|TIN|address|street|$)/i
-    ];
-    
-    // Try recipient name patterns
-    for (const pattern of recipientNamePatterns) {
-      const match = ocrText.match(pattern);
       if (match && match[1]) {
-        const name = match[1].trim();
-        if (name.length > 2 && /^[A-Za-z\s]+$/.test(name)) {
-          info1099.name = name;
-          console.log('✅ [Azure DI OCR Enhanced] Found recipient name:', name);
-          break;
-        }
+        const value = match[1].trim();
+        console.log(`🎯 [Azure DI] Pattern ${i + 1} matched for ${fieldName}: "${value}"`);
+        return value;
       }
     }
     
-    // Enhanced recipient TIN patterns
-    const recipientTinPatterns = [
-      /(?:RECIPIENT'S?\s+TIN|Recipient'?s?\s+TIN)[:\s]+(\d{2,3}[-\s]?\d{2}[-\s]?\d{4})/i,
-      /(?:RECIPIENT'S?\s+TIN|Recipient'?s?\s+TIN)\s*\n(\d{2,3}[-\s]?\d{2}[-\s]?\d{4})/i
-    ];
-    
-    // Try recipient TIN patterns
-    for (const pattern of recipientTinPatterns) {
-      const match = ocrText.match(pattern);
-      if (match && match[1]) {
-        const tin = match[1].trim();
-        if (tin.length >= 9) {
-          info1099.tin = tin;
-          console.log('✅ [Azure DI OCR Enhanced] Found recipient TIN:', tin);
-          break;
-        }
-      }
+    // Additional fallback: search for field name + amount pattern
+    const fallbackPattern = new RegExp(`${fieldName.replace(/([A-Z])/g, '\\s*$1').toLowerCase()}.*?([0-9,]+\\.?\\d{0,2})`, 'i');
+    const fallbackMatch = text.match(fallbackPattern);
+    if (fallbackMatch && fallbackMatch[1]) {
+      console.log(`🔄 [Azure DI] Fallback pattern matched for ${fieldName}: "${fallbackMatch[1]}"`);
+      return fallbackMatch[1];
     }
     
-    // Enhanced payer name patterns
-    const payerNamePatterns = [
-      /(?:PAYER'S?\s+name,\s+street\s+address[^\n]*\n)([A-Za-z\s&.,'-]+?)(?:\n|$)/i,
-      /(?:PAYER'S?\s+name|Payer'?s?\s+name)\s*\n([A-Za-z\s&.,'-]+?)(?:\n|$)/i,
-      /(?:PAYER'S?\s+name|Payer'?s?\s+name)[:\s]+([A-Za-z\s&.,'-]+?)(?:\s+\d|\n|PAYER'S?\s+|Payer'?s?\s+|TIN|address|street|$)/i
-    ];
-    
-    // Try payer name patterns
-    for (const pattern of payerNamePatterns) {
-      const match = ocrText.match(pattern);
-      if (match && match[1]) {
-        const name = match[1].trim();
-        if (name.length > 2 && !name.toLowerCase().includes('street address')) {
-          info1099.payerName = name;
-          console.log('✅ [Azure DI OCR Enhanced] Found payer name:', name);
-          break;
-        }
-      }
-    }
-    
-    // Enhanced payer TIN patterns
-    const payerTinPatterns = [
-      /(?:PAYER'S?\s+TIN|Payer'?s?\s+TIN)[:\s]+(\d{2}[-\s]?\d{7})/i,
-      /(?:PAYER'S?\s+TIN|Payer'?s?\s+TIN)\s*\n(\d{2}[-\s]?\d{7})/i
-    ];
-    
-    // Try payer TIN patterns
-    for (const pattern of payerTinPatterns) {
-      const match = ocrText.match(pattern);
-      if (match && match[1]) {
-        const tin = match[1].trim();
-        if (tin.length >= 9) {
-          info1099.payerTIN = tin;
-          console.log('✅ [Azure DI OCR Enhanced] Found payer TIN:', tin);
-          break;
-        }
-      }
-    }
-    
-    return info1099;
+    return null;
   }
 
   /**
-   * Advanced amount parsing with better error handling
+   * Robust amount parsing with OCR error correction
    */
-  private parseAmountAdvanced(value: any): number {
+  private parseAmountRobustly(value: any): number {
     if (typeof value === 'number') {
       return value;
     }
     
     if (typeof value === 'string') {
-      // Remove currency symbols, commas, and extra spaces
-      const cleanValue = value.replace(/[$,\s]/g, '').trim();
+      // Remove currency symbols, commas, and whitespace
+      let cleanValue = value.replace(/[$,\s]/g, '').trim();
       
       // Handle empty or non-numeric strings
       if (!cleanValue || cleanValue === '' || cleanValue === '-' || cleanValue === 'N/A') {
         return 0;
       }
       
-      // Parse the number
+      // OCR error corrections for numbers - comprehensive mapping
+      const ocrCorrections = {
+        'O': '0', 'o': '0',  // O -> 0
+        'l': '1', 'I': '1', '|': '1',  // l, I, | -> 1
+        'S': '5', 's': '5',  // S -> 5
+        'Z': '2', 'z': '2',  // Z -> 2
+        'G': '6', 'g': '6',  // G -> 6 (sometimes)
+        'B': '8', 'b': '8',  // B -> 8 (sometimes)
+        'T': '7', 't': '7',  // T -> 7 (sometimes)
+        'A': '4', 'a': '4'   // A -> 4 (sometimes)
+      };
+      
+      // Apply OCR corrections
+      for (const [wrong, correct] of Object.entries(ocrCorrections)) {
+        cleanValue = cleanValue.replace(new RegExp(wrong, 'g'), correct);
+      }
+      
+      // Parse the cleaned value
       const parsed = parseFloat(cleanValue);
+      
+      // Return 0 for invalid numbers
       return isNaN(parsed) ? 0 : parsed;
     }
     
     return 0;
-  }
-
-  // Keep all existing methods from the original implementation
-  private getModelIdForDocumentType(documentType: string): string {
-    switch (documentType) {
-      case 'W2':
-        return 'prebuilt-tax.us.w2';
-      case 'FORM_1099_INT':
-      case 'FORM_1099_DIV':
-      case 'FORM_1099_MISC':
-      case 'FORM_1099_NEC':
-        // All 1099 variants use the unified 1099 model
-        return 'prebuilt-tax.us.1099';
-      default:
-        // Use general document model for other types
-        return 'prebuilt-document';
-    }
-  }
-
-  private extractTaxDocumentFieldsFromOCR(result: any, documentType: string): ExtractedFieldData {
-    console.log('🔍 [Azure DI] Extracting tax document fields using OCR fallback...');
-    
-    const extractedData: ExtractedFieldData = {};
-    
-    // Extract text content from OCR result
-    extractedData.fullText = result.content || '';
-    
-    // Use OCR-based extraction methods for different document types
-    switch (documentType) {
-      case 'W2':
-        return this.extractW2FieldsFromOCR(extractedData.fullText as string, extractedData);
-      case 'FORM_1099_INT':
-        return this.extract1099IntFieldsFromOCR(extractedData.fullText as string, extractedData);
-      case 'FORM_1099_DIV':
-        return this.extract1099DivFieldsFromOCR(extractedData.fullText as string, extractedData);
-      case 'FORM_1099_MISC':
-        return this.extract1099MiscFieldsFromOCR(extractedData.fullText as string, extractedData);
-      case 'FORM_1099_NEC':
-        return this.extract1099NecFieldsFromOCR(extractedData.fullText as string, extractedData);
-      default:
-        console.log('🔍 [Azure DI] Using generic OCR extraction for document type:', documentType);
-        return this.extractGenericFieldsFromOCR(extractedData.fullText as string, extractedData);
-    }
-  }
-
-  private extractTaxDocumentFields(result: any, documentType: string): ExtractedFieldData {
-    const extractedData: ExtractedFieldData = {};
-    
-    // Extract text content
-    extractedData.fullText = result.content || '';
-    
-    // Extract form fields
-    if (result.documents && result.documents.length > 0) {
-      const document = result.documents[0];
-      
-      if (document.fields) {
-        // Process fields based on document type
-        switch (documentType) {
-          case 'W2':
-            return this.processW2Fields(document.fields, extractedData);
-          case 'FORM_1099_INT':
-            return this.process1099IntFields(document.fields, extractedData);
-          case 'FORM_1099_DIV':
-            return this.process1099DivFields(document.fields, extractedData);
-          case 'FORM_1099_MISC':
-            return this.process1099MiscFields(document.fields, extractedData);
-          case 'FORM_1099_NEC':
-            return this.process1099NecFields(document.fields, extractedData);
-          default:
-            return this.processGenericFields(document.fields, extractedData);
-        }
-      }
-    }
-    
-    // Extract key-value pairs from tables if available
-    if (result.keyValuePairs) {
-      for (const kvp of result.keyValuePairs) {
-        const key = kvp.key?.content?.trim();
-        const value = kvp.value?.content?.trim();
-        if (key && value) {
-          extractedData[key] = value;
-        }
-      }
-    }
-    
-    return extractedData;
-  }
-
-  private processW2Fields(fields: any, baseData: ExtractedFieldData): ExtractedFieldData {
-    const w2Data = { ...baseData };
-    
-    // W2 specific field mappings
-    const w2FieldMappings = {
-      'Employee.Name': 'employeeName',
-      'Employee.SSN': 'employeeSSN',
-      'Employee.Address': 'employeeAddress',
-      'Employer.Name': 'employerName',
-      'Employer.EIN': 'employerEIN',
-      'Employer.Address': 'employerAddress',
-      'WagesAndTips': 'wages',
-      'FederalIncomeTaxWithheld': 'federalTaxWithheld',
-      'SocialSecurityWages': 'socialSecurityWages',
-      'SocialSecurityTaxWithheld': 'socialSecurityTaxWithheld',
-      'MedicareWagesAndTips': 'medicareWages',
-      'MedicareTaxWithheld': 'medicareTaxWithheld',
-      'SocialSecurityTips': 'socialSecurityTips',
-      'AllocatedTips': 'allocatedTips',
-      'StateWagesTipsEtc': 'stateWages',
-      'StateIncomeTax': 'stateTaxWithheld',
-      'LocalWagesTipsEtc': 'localWages',
-      'LocalIncomeTax': 'localTaxWithheld'
-    };
-    
-    for (const [azureFieldName, mappedFieldName] of Object.entries(w2FieldMappings)) {
-      if (fields[azureFieldName]?.value !== undefined) {
-        const value = fields[azureFieldName].value;
-        w2Data[mappedFieldName] = typeof value === 'number' ? value : this.parseAmount(value);
-      }
-    }
-    
-    // Enhanced personal info extraction with better fallback handling
-    console.log('🔍 [Azure DI] Extracting personal information from W2...');
-    
-    // Employee Name - try multiple field variations
-    if (!w2Data.employeeName) {
-      const nameFields = ['Employee.Name', 'EmployeeName', 'Employee_Name', 'RecipientName'];
-      for (const fieldName of nameFields) {
-        if (fields[fieldName]?.value) {
-          w2Data.employeeName = fields[fieldName].value;
-          console.log('✅ [Azure DI] Found employee name:', w2Data.employeeName);
-          break;
-        }
-      }
-    }
-    
-    // Employee SSN - try multiple field variations
-    if (!w2Data.employeeSSN) {
-      const ssnFields = ['Employee.SSN', 'EmployeeSSN', 'Employee_SSN', 'RecipientTIN'];
-      for (const fieldName of ssnFields) {
-        if (fields[fieldName]?.value) {
-          w2Data.employeeSSN = fields[fieldName].value;
-          console.log('✅ [Azure DI] Found employee SSN:', w2Data.employeeSSN);
-          break;
-        }
-      }
-    }
-    
-    // Employee Address - try multiple field variations
-    if (!w2Data.employeeAddress) {
-      const addressFields = ['Employee.Address', 'EmployeeAddress', 'Employee_Address', 'RecipientAddress'];
-      for (const fieldName of addressFields) {
-        if (fields[fieldName]?.value) {
-          w2Data.employeeAddress = fields[fieldName].value;
-          console.log('✅ [Azure DI] Found employee address:', w2Data.employeeAddress);
-          break;
-        }
-      }
-    }
-    
-    // OCR fallback for personal info if not found in structured fields
-    if ((!w2Data.employeeName || !w2Data.employeeSSN || !w2Data.employeeAddress || !w2Data.employerName || !w2Data.employerAddress) && baseData.fullText) {
-      console.log('🔍 [Azure DI] Some personal info missing from structured fields, attempting OCR extraction...');
-      
-      // Pass the already extracted employee name as a target for multi-employee scenarios
-      const targetEmployeeName = w2Data.employeeName as string | undefined;
-      const personalInfoFromOCR = this.extractPersonalInfoFromOCR(baseData.fullText as string, targetEmployeeName);
-      
-      if (!w2Data.employeeName && personalInfoFromOCR.name) {
-        w2Data.employeeName = personalInfoFromOCR.name;
-        console.log('✅ [Azure DI] Extracted employee name from OCR:', w2Data.employeeName);
-      }
-      
-      if (!w2Data.employeeSSN && personalInfoFromOCR.ssn) {
-        w2Data.employeeSSN = personalInfoFromOCR.ssn;
-        console.log('✅ [Azure DI] Extracted employee SSN from OCR:', w2Data.employeeSSN);
-      }
-      
-      if (!w2Data.employeeAddress && personalInfoFromOCR.address) {
-        w2Data.employeeAddress = personalInfoFromOCR.address;
-        console.log('✅ [Azure DI] Extracted employee address from OCR:', w2Data.employeeAddress);
-      }
-      
-      if (!w2Data.employerName && personalInfoFromOCR.employerName) {
-        w2Data.employerName = personalInfoFromOCR.employerName;
-        console.log('✅ [Azure DI] Extracted employer name from OCR:', w2Data.employerName);
-      }
-      
-      if (!w2Data.employerAddress && personalInfoFromOCR.employerAddress) {
-        w2Data.employerAddress = personalInfoFromOCR.employerAddress;
-        console.log('✅ [Azure DI] Extracted employer address from OCR:', w2Data.employerAddress);
-      }
-    }
-
-    // Enhanced address parsing - extract city, state, and zipCode from full address
-    if (w2Data.employeeAddress && typeof w2Data.employeeAddress === 'string') {
-      console.log('🔍 [Azure DI] Parsing address components from:', w2Data.employeeAddress);
-      const ocrText = typeof baseData.fullText === 'string' ? baseData.fullText : '';
-      const addressParts = this.extractAddressParts(w2Data.employeeAddress, ocrText);
-      
-      // Add parsed address components to W2 data
-      w2Data.employeeAddressStreet = addressParts.street;
-      w2Data.employeeCity = addressParts.city;
-      w2Data.employeeState = addressParts.state;
-      w2Data.employeeZipCode = addressParts.zipCode;
-      
-      console.log('✅ [Azure DI] Parsed address components:', {
-        street: w2Data.employeeAddressStreet,
-        city: w2Data.employeeCity,
-        state: w2Data.employeeState,
-        zipCode: w2Data.employeeZipCode
-      });
-    }
-    
-    // OCR fallback for Box 1 wages if not found in structured fields
-    if (!w2Data.wages && baseData.fullText) {
-      console.log('🔍 [Azure DI] Wages not found in structured fields, attempting OCR extraction...');
-      const wagesFromOCR = this.extractWagesFromOCR(baseData.fullText as string);
-      if (wagesFromOCR > 0) {
-        console.log('✅ [Azure DI] Successfully extracted wages from OCR:', wagesFromOCR);
-        w2Data.wages = wagesFromOCR;
-      }
-    }
-    
-    return w2Data;
-  }
-
-  private process1099IntFields(fields: any, baseData: ExtractedFieldData): ExtractedFieldData {
-    const data = { ...baseData };
-    
-    const fieldMappings = {
-      'Payer.Name': 'payerName',
-      'Payer.TIN': 'payerTIN',
-      'Payer.Address': 'payerAddress',
-      'Recipient.Name': 'recipientName',
-      'Recipient.TIN': 'recipientTIN',
-      'Recipient.Address': 'recipientAddress',
-      'InterestIncome': 'interestIncome',
-      'EarlyWithdrawalPenalty': 'earlyWithdrawalPenalty',
-      'InterestOnUSTreasuryObligations': 'interestOnUSavingsBonds',
-      'FederalIncomeTaxWithheld': 'federalTaxWithheld',
-      'InvestmentExpenses': 'investmentExpenses',
-      'ForeignTaxPaid': 'foreignTaxPaid',
-      'TaxExemptInterest': 'taxExemptInterest'
-    };
-    
-    for (const [azureFieldName, mappedFieldName] of Object.entries(fieldMappings)) {
-      if (fields[azureFieldName]?.value !== undefined) {
-        const value = fields[azureFieldName].value;
-        data[mappedFieldName] = typeof value === 'number' ? value : this.parseAmount(value);
-      }
-    }
-    
-    // OCR fallback for personal info if not found in structured fields
-    if ((!data.recipientName || !data.recipientTIN || !data.recipientAddress || !data.payerName || !data.payerTIN) && baseData.fullText) {
-      console.log('🔍 [Azure DI] Some 1099 info missing from structured fields, attempting OCR extraction...');
-      const personalInfoFromOCR = this.extractPersonalInfoFromOCR(baseData.fullText as string);
-      
-      if (!data.recipientName && personalInfoFromOCR.name) {
-        data.recipientName = personalInfoFromOCR.name;
-        console.log('✅ [Azure DI] Extracted recipient name from OCR:', data.recipientName);
-      }
-      
-      if (!data.recipientTIN && personalInfoFromOCR.tin) {
-        data.recipientTIN = personalInfoFromOCR.tin;
-        console.log('✅ [Azure DI] Extracted recipient TIN from OCR:', data.recipientTIN);
-      }
-      
-      if (!data.recipientAddress && personalInfoFromOCR.address) {
-        data.recipientAddress = personalInfoFromOCR.address;
-        console.log('✅ [Azure DI] Extracted recipient address from OCR:', data.recipientAddress);
-      }
-      
-      if (!data.payerName && personalInfoFromOCR.payerName) {
-        data.payerName = personalInfoFromOCR.payerName;
-        console.log('✅ [Azure DI] Extracted payer name from OCR:', data.payerName);
-      }
-      
-      if (!data.payerTIN && personalInfoFromOCR.payerTIN) {
-        data.payerTIN = personalInfoFromOCR.payerTIN;
-        console.log('✅ [Azure DI] Extracted payer TIN from OCR:', data.payerTIN);
-      }
-    }
-    
-    return data;
-  }
-
-  private process1099DivFields(fields: any, baseData: ExtractedFieldData): ExtractedFieldData {
-    const data = { ...baseData };
-    
-    const fieldMappings = {
-      'Payer.Name': 'payerName',
-      'Payer.TIN': 'payerTIN',
-      'Payer.Address': 'payerAddress',
-      'Recipient.Name': 'recipientName',
-      'Recipient.TIN': 'recipientTIN',
-      'Recipient.Address': 'recipientAddress',
-      'OrdinaryDividends': 'ordinaryDividends',
-      'QualifiedDividends': 'qualifiedDividends',
-      'TotalCapitalGainDistributions': 'totalCapitalGain',
-      'NondividendDistributions': 'nondividendDistributions',
-      'FederalIncomeTaxWithheld': 'federalTaxWithheld',
-      'Section199ADividends': 'section199ADividends'
-    };
-    
-    for (const [azureFieldName, mappedFieldName] of Object.entries(fieldMappings)) {
-      if (fields[azureFieldName]?.value !== undefined) {
-        const value = fields[azureFieldName].value;
-        data[mappedFieldName] = typeof value === 'number' ? value : this.parseAmount(value);
-      }
-    }
-    
-    // OCR fallback for personal info if not found in structured fields
-    if ((!data.recipientName || !data.recipientTIN || !data.recipientAddress || !data.payerName || !data.payerTIN) && baseData.fullText) {
-      console.log('🔍 [Azure DI] Some 1099-DIV info missing from structured fields, attempting OCR extraction...');
-      const personalInfoFromOCR = this.extractPersonalInfoFromOCR(baseData.fullText as string);
-      
-      if (!data.recipientName && personalInfoFromOCR.name) {
-        data.recipientName = personalInfoFromOCR.name;
-        console.log('✅ [Azure DI] Extracted recipient name from OCR:', data.recipientName);
-      }
-      
-      if (!data.recipientTIN && personalInfoFromOCR.tin) {
-        data.recipientTIN = personalInfoFromOCR.tin;
-        console.log('✅ [Azure DI] Extracted recipient TIN from OCR:', data.recipientTIN);
-      }
-      
-      if (!data.recipientAddress && personalInfoFromOCR.address) {
-        data.recipientAddress = personalInfoFromOCR.address;
-        console.log('✅ [Azure DI] Extracted recipient address from OCR:', data.recipientAddress);
-      }
-      
-      if (!data.payerName && personalInfoFromOCR.payerName) {
-        data.payerName = personalInfoFromOCR.payerName;
-        console.log('✅ [Azure DI] Extracted payer name from OCR:', data.payerName);
-      }
-      
-      if (!data.payerTIN && personalInfoFromOCR.payerTIN) {
-        data.payerTIN = personalInfoFromOCR.payerTIN;
-        console.log('✅ [Azure DI] Extracted payer TIN from OCR:', data.payerTIN);
-      }
-    }
-    
-    return data;
-  }
-
-  private process1099MiscFields(fields: any, baseData: ExtractedFieldData): ExtractedFieldData {
-    const data = { ...baseData };
-    
-    // Comprehensive field mappings for all 1099-MISC boxes
-    const fieldMappings = {
-      // Payer and recipient information
-      'Payer.Name': 'payerName',
-      'Payer.TIN': 'payerTIN',
-      'Payer.Address': 'payerAddress',
-      'Recipient.Name': 'recipientName',
-      'Recipient.TIN': 'recipientTIN',
-      'Recipient.Address': 'recipientAddress',
-      'AccountNumber': 'accountNumber',
-      
-      // Box 1-18 mappings
-      'Rents': 'rents',                                           // Box 1
-      'Royalties': 'royalties',                                   // Box 2
-      'OtherIncome': 'otherIncome',                              // Box 3
-      'FederalIncomeTaxWithheld': 'federalTaxWithheld',          // Box 4
-      'FishingBoatProceeds': 'fishingBoatProceeds',              // Box 5
-      'MedicalAndHealthCarePayments': 'medicalHealthPayments',    // Box 6
-      'NonemployeeCompensation': 'nonemployeeCompensation',       // Box 7 (deprecated)
-      'SubstitutePayments': 'substitutePayments',                 // Box 8
-      'CropInsuranceProceeds': 'cropInsuranceProceeds',          // Box 9
-      'GrossProceedsPaidToAttorney': 'grossProceedsAttorney',         // Box 10
-      'FishPurchasedForResale': 'fishPurchases',                 // Box 11
-      'Section409ADeferrals': 'section409ADeferrals',            // Box 12
-      'ExcessGoldenParachutePayments': 'excessGoldenParachutePayments', // Box 13
-      'NonqualifiedDeferredCompensation': 'nonqualifiedDeferredCompensation', // Box 14
-      'Section409AIncome': 'section409AIncome',                  // Box 15a
-      'StateTaxWithheld': 'stateTaxWithheld',                    // Box 16
-      'StatePayerNumber': 'statePayerNumber',                    // Box 17
-      'StateIncome': 'stateIncome',                              // Box 18
-      
-      // Alternative field names that Azure might use
-      'Box1': 'rents',
-      'Box2': 'royalties',
-      'Box3': 'otherIncome',
-      'Box4': 'federalTaxWithheld',
-      'Box5': 'fishingBoatProceeds',
-      'Box6': 'medicalHealthPayments',
-      'Box7': 'nonemployeeCompensation',
-      'Box8': 'substitutePayments',
-      'Box9': 'cropInsuranceProceeds',
-      'Box10': 'grossProceedsAttorney',
-      'Box11': 'fishPurchases',
-      'Box12': 'section409ADeferrals',
-      'Box13': 'excessGoldenParachutePayments',
-      'Box14': 'nonqualifiedDeferredCompensation',
-      'Box15a': 'section409AIncome',
-      'Box16': 'stateTaxWithheld',
-      'Box17': 'statePayerNumber',
-      'Box18': 'stateIncome'
-    };
-    
-    for (const [azureFieldName, mappedFieldName] of Object.entries(fieldMappings)) {
-      if (fields[azureFieldName]?.value !== undefined) {
-        const value = fields[azureFieldName].value;
-        
-        // Handle text fields vs numeric fields
-        if (mappedFieldName === 'statePayerNumber' || mappedFieldName === 'accountNumber') {
-          data[mappedFieldName] = String(value).trim();
-        } else {
-          data[mappedFieldName] = typeof value === 'number' ? value : this.parseAmount(value);
-        }
-      }
-    }
-    
-    // OCR fallback for personal info if not found in structured fields
-    if ((!data.recipientName || !data.recipientTIN || !data.recipientAddress || !data.payerName || !data.payerTIN) && baseData.fullText) {
-      console.log('🔍 [Azure DI] Some 1099-MISC info missing from structured fields, attempting OCR extraction...');
-      const personalInfoFromOCR = this.extractPersonalInfoFromOCR(baseData.fullText as string);
-      
-      if (!data.recipientName && personalInfoFromOCR.name) {
-        data.recipientName = personalInfoFromOCR.name;
-        console.log('✅ [Azure DI] Extracted recipient name from OCR:', data.recipientName);
-      }
-      
-      if (!data.recipientTIN && personalInfoFromOCR.tin) {
-        data.recipientTIN = personalInfoFromOCR.tin;
-        console.log('✅ [Azure DI] Extracted recipient TIN from OCR:', data.recipientTIN);
-      }
-      
-      if (!data.recipientAddress && personalInfoFromOCR.address) {
-        data.recipientAddress = personalInfoFromOCR.address;
-        console.log('✅ [Azure DI] Extracted recipient address from OCR:', data.recipientAddress);
-      }
-      
-      if (!data.payerName && personalInfoFromOCR.payerName) {
-        data.payerName = personalInfoFromOCR.payerName;
-        console.log('✅ [Azure DI] Extracted payer name from OCR:', data.payerName);
-      }
-      
-      if (!data.payerTIN && personalInfoFromOCR.payerTIN) {
-        data.payerTIN = personalInfoFromOCR.payerTIN;
-        console.log('✅ [Azure DI] Extracted payer TIN from OCR:', data.payerTIN);
-      }
-    }
-    
-    // CRITICAL FIX: Add field validation and correction using OCR fallback
-    if (baseData.fullText) {
-      const validatedData = this.validateAndCorrect1099MiscFields(data, baseData.fullText as string);
-      return validatedData;
-    }
-    
-    return data;
   }
 
   /**
-   * Validates and corrects 1099-MISC field mappings using OCR fallback
-   * This addresses the issue where Azure DI maps values to incorrect fields
+   * Preprocess OCR text to handle common OCR errors and improve matching
    */
-  private validateAndCorrect1099MiscFields(
-    structuredData: ExtractedFieldData, 
-    ocrText: string
-  ): ExtractedFieldData {
-    console.log('🔍 [Azure DI] Validating 1099-MISC field mappings...');
+  private preprocessOCRTextForExtraction(ocrText: string): string {
+    let processed = ocrText;
     
-    // Extract data using OCR as ground truth
-    const ocrData = this.extract1099MiscFieldsFromOCR(ocrText, { fullText: ocrText });
-    
-    const correctedData = { ...structuredData };
-    let correctionsMade = 0;
-    
-    // Define validation rules for critical fields that commonly get mismatched
-    const criticalFields = [
-      'otherIncome',           // Box 3 - Often gets mapped incorrectly
-      'fishingBoatProceeds',   // Box 5 - Often receives wrong values
-      'medicalHealthPayments', // Box 6 - Often gets cross-contaminated
-      'rents',                 // Box 1 - Sometimes misaligned
-      'royalties',             // Box 2 - Sometimes misaligned
-      'federalTaxWithheld'     // Box 4 - Important for tax calculations
+    // Common OCR character corrections
+    const corrections = [
+      // Numbers in context
+      { from: /O(?=\d)/g, to: '0' }, // O followed by digit -> 0
+      { from: /(?<=\d)O/g, to: '0' }, // O preceded by digit -> 0
+      { from: /l(?=\d)/g, to: '1' }, // l followed by digit -> 1
+      { from: /(?<=\d)l/g, to: '1' }, // l preceded by digit -> 1
+      { from: /I(?=\d)/g, to: '1' }, // I followed by digit -> 1
+      { from: /(?<=\d)I/g, to: '1' }, // I preceded by digit -> 1
+      { from: /S(?=\d)/g, to: '5' }, // S followed by digit -> 5
+      { from: /(?<=\d)S/g, to: '5' }, // S preceded by digit -> 5
+      { from: /Z(?=\d)/g, to: '2' }, // Z followed by digit -> 2
+      { from: /(?<=\d)Z/g, to: '2' }, // Z preceded by digit -> 2
+      { from: /G(?=\d)/g, to: '6' }, // G followed by digit -> 6
+      { from: /(?<=\d)G/g, to: '6' }, // G preceded by digit -> 6
+      { from: /B(?=\d)/g, to: '8' }, // B followed by digit -> 8
+      { from: /(?<=\d)B/g, to: '8' }, // B preceded by digit -> 8
+      { from: /g(?=\d)/g, to: '9' }, // g followed by digit -> 9
+      { from: /(?<=\d)g/g, to: '9' }, // g preceded by digit -> 9
+      
+      // Common word corrections
+      { from: /lnterest/g, to: 'Interest' },
+      { from: /Eariy/g, to: 'Early' },
+      { from: /Forelgn/g, to: 'Foreign' },
+      { from: /Treasuiy/g, to: 'Treasury' },
+      { from: /Wlthheld/g, to: 'Withheld' },
+      { from: /Pald/g, to: 'Paid' },
+      { from: /Dlscount/g, to: 'Discount' },
+      { from: /Premlum/g, to: 'Premium' },
+      { from: /Obllgations/g, to: 'Obligations' },
+      { from: /Savlngs/g, to: 'Savings' },
+      { from: /Wlthdrawal/g, to: 'Withdrawal' },
+      { from: /Penaliy/g, to: 'Penalty' },
+      { from: /Exempi/g, to: 'Exempt' },
+      { from: /Prlvate/g, to: 'Private' },
+      { from: /Actlvity/g, to: 'Activity' },
+      { from: /Markel/g, to: 'Market' },
+      { from: /Amortlzation/g, to: 'Amortization' }
     ];
     
-    for (const field of criticalFields) {
-      const structuredValue = this.parseAmount(structuredData[field]) || 0;
-      const ocrValue = this.parseAmount(ocrData[field]) || 0;
-      
-      // If values differ significantly (more than $100), trust OCR
-      if (Math.abs(structuredValue - ocrValue) > 100) {
-        console.log(`🔧 [Azure DI] Correcting ${field}: $${structuredValue} → $${ocrValue} (OCR)`);
-        correctedData[field] = ocrValue;
-        correctionsMade++;
-      }
-      // If structured field is empty/null but OCR found a value, use OCR
-      else if ((structuredValue === 0 || !structuredData[field]) && ocrValue > 0) {
-        console.log(`🔧 [Azure DI] Filling missing ${field}: $0 → $${ocrValue} (OCR)`);
-        correctedData[field] = ocrValue;
-        correctionsMade++;
-      }
+    for (const correction of corrections) {
+      processed = processed.replace(correction.from, correction.to);
     }
     
-    // Special validation for common cross-contamination patterns
-    // Pattern 1: Other Income value incorrectly mapped to Fishing Boat Proceeds
-    if (structuredData.fishingBoatProceeds && !structuredData.otherIncome && 
-        ocrData.otherIncome && ocrData.fishingBoatProceeds) {
-      const structuredFishing = this.parseAmount(structuredData.fishingBoatProceeds);
-      const ocrOther = this.parseAmount(ocrData.otherIncome);
-      const ocrFishing = this.parseAmount(ocrData.fishingBoatProceeds);
-      
-      // If structured fishing amount matches OCR other income amount, it's likely swapped
-      if (Math.abs(structuredFishing - ocrOther) < 100 && ocrFishing !== structuredFishing) {
-        console.log(`🔧 [Azure DI] Detected cross-contamination: Other Income/Fishing Boat Proceeds swap`);
-        correctedData.otherIncome = ocrOther;
-        correctedData.fishingBoatProceeds = ocrFishing;
-        correctionsMade += 2;
-      }
-    }
-    
-    // Pattern 2: Values shifted between adjacent boxes
-    const adjacentBoxPairs = [
-      ['rents', 'royalties'],
-      ['royalties', 'otherIncome'],
-      ['otherIncome', 'federalTaxWithheld'],
-      ['federalTaxWithheld', 'fishingBoatProceeds'],
-      ['fishingBoatProceeds', 'medicalHealthPayments']
-    ];
-    
-    for (const [field1, field2] of adjacentBoxPairs) {
-      const struct1 = this.parseAmount(structuredData[field1]) || 0;
-      const struct2 = this.parseAmount(structuredData[field2]) || 0;
-      const ocr1 = this.parseAmount(ocrData[field1]) || 0;
-      const ocr2 = this.parseAmount(ocrData[field2]) || 0;
-      
-      // Check if values are swapped between adjacent fields
-      if (struct1 > 0 && struct2 > 0 && ocr1 > 0 && ocr2 > 0) {
-        if (Math.abs(struct1 - ocr2) < 100 && Math.abs(struct2 - ocr1) < 100) {
-          console.log(`🔧 [Azure DI] Detected adjacent field swap: ${field1} ↔ ${field2}`);
-          correctedData[field1] = ocr1;
-          correctedData[field2] = ocr2;
-          correctionsMade += 2;
-        }
-      }
-    }
-    
-    if (correctionsMade > 0) {
-      console.log(`✅ [Azure DI] Made ${correctionsMade} field corrections using OCR validation`);
-      
-      // Log the corrections for debugging
-      console.log('🔍 [Azure DI] Field correction summary:');
-      for (const field of criticalFields) {
-        const originalValue = this.parseAmount(structuredData[field]) || 0;
-        const correctedValue = this.parseAmount(correctedData[field]) || 0;
-        if (originalValue !== correctedValue) {
-          console.log(`  ${field}: $${originalValue} → $${correctedValue}`);
-        }
-      }
-    } else {
-      console.log('✅ [Azure DI] No field corrections needed - structured extraction appears accurate');
-    }
-    
-    return correctedData;
+    return processed;
   }
 
-  private process1099NecFields(fields: any, baseData: ExtractedFieldData): ExtractedFieldData {
-    const data = { ...baseData };
+  /**
+   * Extract personal information (payer, recipient) from OCR text
+   */
+  private extractPersonalInformation(ocrText: string): Partial<ExtractedFieldData> {
+    const personalInfo: Partial<ExtractedFieldData> = {};
     
-    const fieldMappings = {
-      'Payer.Name': 'payerName',
-      'Payer.TIN': 'payerTIN',
-      'Payer.Address': 'payerAddress',
-      'Recipient.Name': 'recipientName',
-      'Recipient.TIN': 'recipientTIN',
-      'Recipient.Address': 'recipientAddress',
-      'NonemployeeCompensation': 'nonemployeeCompensation',
-      'FederalIncomeTaxWithheld': 'federalTaxWithheld'
+    // Recipient name patterns
+    const recipientNamePatterns = [
+      /(?:RECIPIENT'S?\s+name|Recipient'?s?\s+name)\s*\n([A-Za-z\s]+?)(?:\n|$)/i,
+      /(?:RECIPIENT'S?\s+NAME|Recipient'?s?\s+name)[:\s]+([A-Z\s]+)/i,
+      /Recipient[:\s]+([A-Za-z\s]+?)(?:\n|TIN)/i
+    ];
+    
+    for (const pattern of recipientNamePatterns) {
+      const match = ocrText.match(pattern);
+      if (match && match[1] && match[1].trim().length > 2) {
+        personalInfo.recipientName = match[1].trim();
+        break;
+      }
+    }
+    
+    // Recipient TIN patterns
+    const recipientTINPatterns = [
+      /(?:RECIPIENT'S?\s+TIN|Recipient'?s?\s+TIN)[:\s]*(\d{3}-?\d{2}-?\d{4}|\d{2}-?\d{7})/i,
+      /TIN[:\s]*(\d{3}-?\d{2}-?\d{4}|\d{2}-?\d{7})/i,
+      /(?:SSN|Social Security)[:\s]*(\d{3}-?\d{2}-?\d{4})/i
+    ];
+    
+    for (const pattern of recipientTINPatterns) {
+      const match = ocrText.match(pattern);
+      if (match && match[1]) {
+        personalInfo.recipientTIN = match[1].trim();
+        break;
+      }
+    }
+    
+    // Payer name patterns
+    const payerNamePatterns = [
+      /(?:PAYER'S?\s+name|Payer'?s?\s+name)\s*\n([A-Za-z\s&.,]+?)(?:\n|$)/i,
+      /(?:PAYER'S?\s+NAME|Payer'?s?\s+name)[:\s]+([A-Z\s&.,]+)/i,
+      /Payer[:\s]+([A-Za-z\s&.,]+?)(?:\n|TIN)/i
+    ];
+    
+    for (const pattern of payerNamePatterns) {
+      const match = ocrText.match(pattern);
+      if (match && match[1] && match[1].trim().length > 2) {
+        personalInfo.payerName = match[1].trim();
+        break;
+      }
+    }
+    
+    // Payer TIN patterns
+    const payerTINPatterns = [
+      /(?:PAYER'S?\s+TIN|Payer'?s?\s+TIN)[:\s]*(\d{2}-?\d{7})/i,
+      /(?:EIN|Employer ID)[:\s]*(\d{2}-?\d{7})/i
+    ];
+    
+    for (const pattern of payerTINPatterns) {
+      const match = ocrText.match(pattern);
+      if (match && match[1]) {
+        personalInfo.payerTIN = match[1].trim();
+        break;
+      }
+    }
+    
+    return personalInfo;
+  }
+
+  /**
+   * Generic field extraction for non-1099-INT documents
+   */
+  private extractGenericFields(ocrText: string): ExtractedFieldData {
+    return {
+      fullText: ocrText,
+      extractionWarnings: ['Generic extraction used - document type not specifically supported'],
+      confidence: 0.3
     };
+  }
+
+  /**
+   * Parse 1099-INT document specifically with enhanced validation
+   */
+  async parse1099Int(documentPathOrBuffer: string | Buffer): Promise<ExtractedFieldData> {
+    console.log('🔍 [Azure DI] Starting specialized 1099-INT parsing...');
     
-    for (const [azureFieldName, mappedFieldName] of Object.entries(fieldMappings)) {
-      if (fields[azureFieldName]?.value !== undefined) {
-        const value = fields[azureFieldName].value;
-        data[mappedFieldName] = typeof value === 'number' ? value : this.parseAmount(value);
-      }
+    const result = await this.extractDataFromDocument(documentPathOrBuffer, 'FORM_1099_INT');
+    
+    // Apply 1099-INT specific validation and corrections
+    return this.validate1099IntFields(result);
+  }
+
+  /**
+   * Validate and correct 1099-INT fields based on business rules
+   */
+  private validate1099IntFields(data: ExtractedFieldData): ExtractedFieldData {
+    const validatedData = { ...data };
+    const warnings = [...(data.extractionWarnings || [])];
+    
+    // Get numeric values for validation
+    const interestIncome = this.parseAmountRobustly(data.interestIncome) || 0;
+    const earlyWithdrawalPenalty = this.parseAmountRobustly(data.earlyWithdrawalPenalty) || 0;
+    const federalTaxWithheld = this.parseAmountRobustly(data.federalTaxWithheld) || 0;
+    const foreignTaxPaid = this.parseAmountRobustly(data.foreignTaxPaid) || 0;
+    const interestOnUSavingsBonds = this.parseAmountRobustly(data.interestOnUSavingsBonds) || 0;
+    
+    // Validation Rule 1: Early withdrawal penalty should not exceed interest income
+    if (earlyWithdrawalPenalty > 0 && interestIncome > 0 && earlyWithdrawalPenalty > interestIncome) {
+      warnings.push(`Early withdrawal penalty ($${earlyWithdrawalPenalty}) exceeds interest income ($${interestIncome}) - possible OCR error`);
     }
     
-    // OCR fallback for personal info if not found in structured fields
-    if ((!data.recipientName || !data.recipientTIN || !data.recipientAddress || !data.payerName || !data.payerTIN) && baseData.fullText) {
-      console.log('🔍 [Azure DI] Some 1099-NEC info missing from structured fields, attempting OCR extraction...');
-      const personalInfoFromOCR = this.extractPersonalInfoFromOCR(baseData.fullText as string);
-      
-      if (!data.recipientName && personalInfoFromOCR.name) {
-        data.recipientName = personalInfoFromOCR.name;
-        console.log('✅ [Azure DI] Extracted recipient name from OCR:', data.recipientName);
-      }
-      
-      if (!data.recipientTIN && personalInfoFromOCR.tin) {
-        data.recipientTIN = personalInfoFromOCR.tin;
-        console.log('✅ [Azure DI] Extracted recipient TIN from OCR:', data.recipientTIN);
-      }
-      
-      if (!data.recipientAddress && personalInfoFromOCR.address) {
-        data.recipientAddress = personalInfoFromOCR.address;
-        console.log('✅ [Azure DI] Extracted recipient address from OCR:', data.recipientAddress);
-      }
-      
-      if (!data.payerName && personalInfoFromOCR.payerName) {
-        data.payerName = personalInfoFromOCR.payerName;
-        console.log('✅ [Azure DI] Extracted payer name from OCR:', data.payerName);
-      }
-      
-      if (!data.payerTIN && personalInfoFromOCR.payerTIN) {
-        data.payerTIN = personalInfoFromOCR.payerTIN;
-        console.log('✅ [Azure DI] Extracted payer TIN from OCR:', data.payerTIN);
-      }
+    // Validation Rule 2: Federal tax withheld should be reasonable (typically < 50% of interest)
+    if (federalTaxWithheld > 0 && interestIncome > 0 && federalTaxWithheld > interestIncome * 0.5) {
+      warnings.push(`Federal tax withheld ($${federalTaxWithheld}) seems high compared to interest income ($${interestIncome})`);
     }
     
-    return data;
-  }
-
-  private processGenericFields(fields: any, baseData: ExtractedFieldData): ExtractedFieldData {
-    const data = { ...baseData };
-    
-    // Process all available fields
-    for (const [fieldName, fieldData] of Object.entries(fields)) {
-      if (fieldData && typeof fieldData === 'object' && 'value' in fieldData) {
-        const value = (fieldData as any).value;
-        if (value !== undefined && value !== null && value !== '') {
-          data[fieldName] = typeof value === 'number' ? value : this.parseAmount(value);
-        }
-      }
+    // Validation Rule 3: Foreign tax paid should be reasonable
+    if (foreignTaxPaid > 0 && interestIncome > 0 && foreignTaxPaid > interestIncome * 0.3) {
+      warnings.push(`Foreign tax paid ($${foreignTaxPaid}) seems high compared to interest income ($${interestIncome})`);
     }
     
-    return data;
-  }
-
-  public analyzeDocumentTypeFromOCR(ocrText: string): string {
-    console.log('🔍 [Azure DI] Analyzing document type from OCR content...');
-    
-    const formType = this.detectFormType(ocrText);
-    
-    if (formType === 'W2') {
-      console.log('✅ [Azure DI] Confirmed W2 document type');
-      return 'W2';
-    } else if (formType === '1099') {
-      const specific1099Type = this.detectSpecific1099Type(ocrText);
-      console.log(`✅ [Azure DI] Detected specific 1099 type: ${specific1099Type}`);
-      return specific1099Type;
+    // Validation Rule 4: Treasury interest should not exceed total interest
+    if (interestOnUSavingsBonds > 0 && interestIncome > 0 && interestOnUSavingsBonds > interestIncome) {
+      warnings.push(`Treasury interest ($${interestOnUSavingsBonds}) exceeds total interest income ($${interestIncome}) - possible OCR error`);
     }
     
-    console.log('⚠️ [Azure DI] Could not determine document type from OCR');
-    return 'UNKNOWN';
-  }
-
-  public detectSpecific1099Type(ocrText: string): string {
-    console.log('🔍 [Azure DI] Detecting specific 1099 subtype from OCR text...');
-    
-    const text = ocrText.toLowerCase();
-    
-    // Check for specific 1099 form types with high-confidence indicators
-    const formTypePatterns = [
-      {
-        type: 'FORM_1099_DIV',
-        indicators: [
-          'form 1099-div',
-          'dividends and distributions',
-          'ordinary dividends',
-          'qualified dividends',
-          'total capital gain distributions',
-          'capital gain distributions'
-        ]
-      },
-      {
-        type: 'FORM_1099_INT',
-        indicators: [
-          'form 1099-int',
-          'interest income',
-          'early withdrawal penalty',
-          'interest on u.s. treasury obligations',
-          'investment expenses'
-        ]
-      },
-      {
-        type: 'FORM_1099_MISC',
-        indicators: [
-          'form 1099-misc',
-          'miscellaneous income',
-          'nonemployee compensation',
-          'rents',
-          'royalties',
-          'fishing boat proceeds'
-        ]
-      },
-      {
-        type: 'FORM_1099_NEC',
-        indicators: [
-          'form 1099-nec',
-          'nonemployee compensation',
-          'nec'
-        ]
-      }
-    ];
-    
-    // Score each form type based on indicator matches
-    let bestMatch = { type: 'FORM_1099_MISC', score: 0 }; // Default to MISC
-    
-    for (const formPattern of formTypePatterns) {
-      let score = 0;
-      for (const indicator of formPattern.indicators) {
-        if (text.includes(indicator)) {
-          score += 1;
-          console.log(`✅ [Azure DI] Found indicator "${indicator}" for ${formPattern.type}`);
-        }
-      }
-      
-      if (score > bestMatch.score) {
-        bestMatch = { type: formPattern.type, score };
-      }
+    // OCR Error Correction: Check for suspiciously small amounts that might be OCR errors
+    if (earlyWithdrawalPenalty > 0 && earlyWithdrawalPenalty < 10 && interestIncome > 1000) {
+      warnings.push(`Early withdrawal penalty ($${earlyWithdrawalPenalty}) seems unusually small - possible OCR error (expected range: $100-$2000)`);
     }
     
-    console.log(`✅ [Azure DI] Best match: ${bestMatch.type} (score: ${bestMatch.score})`);
-    return bestMatch.type;
-  }
-
-  private detectFormType(ocrText: string): string {
-    const text = ocrText.toLowerCase();
-    
-    // W2 indicators
-    const w2Indicators = [
-      'form w-2',
-      'wage and tax statement',
-      'wages, tips, other compensation',
-      'federal income tax withheld',
-      'social security wages',
-      'medicare wages'
-    ];
-    
-    // 1099 indicators
-    const form1099Indicators = [
-      'form 1099',
-      '1099-',
-      'payer',
-      'recipient',
-      'tin'
-    ];
-    
-    // Count matches for each form type
-    let w2Score = 0;
-    let form1099Score = 0;
-    
-    for (const indicator of w2Indicators) {
-      if (text.includes(indicator)) {
-        w2Score++;
-      }
+    if (foreignTaxPaid > 0 && foreignTaxPaid < 20 && interestIncome > 1000) {
+      warnings.push(`Foreign tax paid ($${foreignTaxPaid}) seems unusually small - possible OCR error (expected range: $50-$500)`);
     }
     
-    for (const indicator of form1099Indicators) {
-      if (text.includes(indicator)) {
-        form1099Score++;
-      }
-    }
+    validatedData.extractionWarnings = warnings;
     
-    console.log(`🔍 [Azure DI] Form type scores - W2: ${w2Score}, 1099: ${form1099Score}`);
+    // Adjust confidence based on validation results
+    const validationPenalty = warnings.length * 0.05;
+    validatedData.confidence = Math.max(0.1, (data.confidence || 0.5) - validationPenalty);
     
-    if (w2Score > form1099Score) {
-      return 'W2';
-    } else if (form1099Score > 0) {
-      return '1099';
-    }
+    console.log(`✅ [Azure DI] 1099-INT validation completed. Warnings: ${warnings.length}, Final confidence: ${validatedData.confidence}`);
     
-    return 'UNKNOWN';
-  }
-
-  // Add placeholder methods for enhanced processing (these would be implemented with the original methods)
-  private processW2FieldsEnhanced(fields: any, baseData: ExtractedFieldData, result: any): ExtractedFieldData {
-    return this.processW2Fields(fields, baseData);
-  }
-
-  private process1099DivFieldsEnhanced(fields: any, baseData: ExtractedFieldData, result: any): ExtractedFieldData {
-    return this.process1099DivFields(fields, baseData);
-  }
-
-  private process1099MiscFieldsEnhanced(fields: any, baseData: ExtractedFieldData, result: any): ExtractedFieldData {
-    return this.process1099MiscFields(fields, baseData);
-  }
-
-  private process1099NecFieldsEnhanced(fields: any, baseData: ExtractedFieldData, result: any): ExtractedFieldData {
-    return this.process1099NecFields(fields, baseData);
-  }
-
-  private processGenericFieldsEnhanced(fields: any, baseData: ExtractedFieldData, result: any): ExtractedFieldData {
-    return this.processGenericFields(fields, baseData);
-  }
-
-  private extractW2FieldsFromOCREnhanced(ocrText: string, baseData: ExtractedFieldData, result: any): ExtractedFieldData {
-    return this.extractW2FieldsFromOCR(ocrText, baseData);
-  }
-
-  private extract1099DivFieldsFromOCREnhanced(ocrText: string, baseData: ExtractedFieldData, result: any): ExtractedFieldData {
-    return this.extract1099DivFieldsFromOCR(ocrText, baseData);
-  }
-
-  private extract1099MiscFieldsFromOCREnhanced(ocrText: string, baseData: ExtractedFieldData, result: any): ExtractedFieldData {
-    return this.extract1099MiscFieldsFromOCR(ocrText, baseData);
-  }
-
-  private extract1099NecFieldsFromOCREnhanced(ocrText: string, baseData: ExtractedFieldData, result: any): ExtractedFieldData {
-    return this.extract1099NecFieldsFromOCR(ocrText, baseData);
-  }
-
-  private extractGenericFieldsFromOCREnhanced(ocrText: string, baseData: ExtractedFieldData, result: any): ExtractedFieldData {
-    return this.extractGenericFieldsFromOCR(ocrText, baseData);
-  }
-
-  // Enhanced 1099-INT OCR extraction method
-  private async extract1099IntFieldsFromOCREnhanced(ocrText: string, baseData: ExtractedFieldData, result: any): Promise<ExtractedFieldData> {
-    console.log('🚀 [Azure DI OCR Enhanced] Starting advanced 1099-INT field extraction...');
-    
-    const data = { ...baseData };
-    
-    // Use the advanced OCR extraction method
-    const ocrResults = await this.extractOCR1099IntFieldsAdvanced(ocrText, result);
-    
-    // Convert results to the expected format
-    for (const [fieldName, extractionResult] of Object.entries(ocrResults)) {
-      data[fieldName] = extractionResult.value;
-    }
-    
-    // Extract personal info using enhanced method
-    const personalInfo = this.extract1099InfoFromOCREnhanced(ocrText);
-    
-    if (personalInfo.name) data.recipientName = personalInfo.name;
-    if (personalInfo.tin) data.recipientTIN = personalInfo.tin;
-    if (personalInfo.address) data.recipientAddress = personalInfo.address;
-    if (personalInfo.payerName) data.payerName = personalInfo.payerName;
-    if (personalInfo.payerTIN) data.payerTIN = personalInfo.payerTIN;
-    if (personalInfo.payerAddress) data.payerAddress = personalInfo.payerAddress;
-    
-    console.log('✅ [Azure DI OCR Enhanced] Completed advanced 1099-INT field extraction');
-    
-    return data;
-  }
-
-  // Keep all the original OCR extraction methods for backward compatibility
-  private extractW2FieldsFromOCR(ocrText: string, baseData: ExtractedFieldData): ExtractedFieldData {
-    // Implementation would be here - keeping original for now
-    return baseData;
-  }
-
-  private extract1099IntFieldsFromOCR(ocrText: string, baseData: ExtractedFieldData): ExtractedFieldData {
-    // Implementation would be here - keeping original for now
-    return baseData;
-  }
-
-  private extract1099DivFieldsFromOCR(ocrText: string, baseData: ExtractedFieldData): ExtractedFieldData {
-    // Implementation would be here - keeping original for now
-    return baseData;
-  }
-
-  private extract1099MiscFieldsFromOCR(ocrText: string, baseData: ExtractedFieldData): ExtractedFieldData {
-    // Implementation would be here - keeping original for now
-    return baseData;
-  }
-
-  private extract1099NecFieldsFromOCR(ocrText: string, baseData: ExtractedFieldData): ExtractedFieldData {
-    // Implementation would be here - keeping original for now
-    return baseData;
-  }
-
-  private extractGenericFieldsFromOCR(ocrText: string, baseData: ExtractedFieldData): ExtractedFieldData {
-    // Implementation would be here - keeping original for now
-    return baseData;
-  }
-
-  private extractPersonalInfoFromOCR(ocrText: string, targetEmployeeName?: string): {
-    name?: string;
-    ssn?: string;
-    tin?: string;
-    address?: string;
-    employerName?: string;
-    employerAddress?: string;
-    payerName?: string;
-    payerTIN?: string;
-    payerAddress?: string;
-  } {
-    // Implementation would be here - keeping original for now
-    return {};
-  }
-
-  private extractAddressParts(address: string, ocrText: string): {
-    street?: string;
-    city?: string;
-    state?: string;
-    zipCode?: string;
-  } {
-    // Implementation would be here - keeping original for now
-    return {};
-  }
-
-  private extractWagesFromOCR(ocrText: string): number {
-    // Implementation would be here - keeping original for now
-    return 0;
-  }
-
-  private parseAmount(value: any): number {
-    if (typeof value === 'number') {
-      return value;
-    }
-    
-    if (typeof value === 'string') {
-      // Remove currency symbols, commas, and extra spaces
-      const cleanValue = value.replace(/[$,\s]/g, '').trim();
-      
-      // Handle empty or non-numeric strings
-      if (!cleanValue || cleanValue === '' || cleanValue === '-') {
-        return 0;
-      }
-      
-      // Parse the number
-      const parsed = parseFloat(cleanValue);
-      return isNaN(parsed) ? 0 : parsed;
-    }
-    
-    return 0;
+    return validatedData;
   }
 }
 
 /**
- * Factory function to create an AzureDocumentIntelligenceService instance
- * using environment variables for configuration
+ * Factory function to create and return an AzureDocumentIntelligenceService instance
+ * This function is expected by the route files for dependency injection
  */
 export function getAzureDocumentIntelligenceService(): AzureDocumentIntelligenceService {
-  const endpoint = process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT;
-  const apiKey = process.env.AZURE_DOCUMENT_INTELLIGENCE_API_KEY;
-
-  if (!endpoint) {
-    throw new Error('AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT environment variable is required');
-  }
-
-  if (!apiKey) {
-    throw new Error('AZURE_DOCUMENT_INTELLIGENCE_API_KEY environment variable is required');
-  }
-
   const config: AzureDocumentIntelligenceConfig = {
-    endpoint,
-    apiKey
+    endpoint: process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT || '',
+    apiKey: process.env.AZURE_DOCUMENT_INTELLIGENCE_API_KEY || ''
   };
-
+  
+  if (!config.endpoint || !config.apiKey) {
+    throw new Error('Azure Document Intelligence configuration is missing. Please set AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and AZURE_DOCUMENT_INTELLIGENCE_API_KEY environment variables.');
+  }
+  
   return new AzureDocumentIntelligenceService(config);
 }
+
+// Export for testing and demonstration
+export const test1099IntExtraction = async (ocrText: string) => {
+  const service = new AzureDocumentIntelligenceService({
+    endpoint: 'https://test.cognitiveservices.azure.com/',
+    apiKey: 'test-key'
+  });
+  
+  // Test the extraction logic without actual Azure calls
+  return (service as any).extract1099IntFieldsAggressively(ocrText);
+};
