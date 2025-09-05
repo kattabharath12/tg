@@ -33,12 +33,6 @@ export async function POST(
       return NextResponse.json({ error: 'Document already processed' }, { status: 400 });
     }
 
-    // Update processing status to IN_PROGRESS
-    await prisma.document.update({
-      where: { id: documentId },
-      data: { processingStatus: 'IN_PROGRESS' },
-    });
-
     try {
       // Initialize Azure Document Intelligence service
       const azureService = new AzureDocumentIntelligenceService({
