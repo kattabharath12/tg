@@ -18,7 +18,7 @@ export interface FieldExtractionResult {
 
 // Enhanced extracted field data interface
 export interface ExtractedFieldData {
-  [key: string]: string | number | DocumentType | number[] | string[] | undefined;
+  [key: string]: string | number | DocumentType | number[] | string[] | object | undefined;
   fullText?: string;
   confidence?: number;
   extractionWarnings?: string[];
