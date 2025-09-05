@@ -108,6 +108,13 @@ export async function POST(
     let finalDocumentType = document.documentType;
     
     try {
+      try {
+  // ADD DEBUG CODE HERE ⬇️
+  console.log('🔍 [DEBUG] Azure Config Check:');
+  console.log('Endpoint:', process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT ? 'SET' : 'MISSING');
+  console.log('API Key:', process.env.AZURE_DOCUMENT_INTELLIGENCE_API_KEY ? 'SET' : 'MISSING');
+  console.log('Endpoint value:', process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT);
+  
       const azureService = getAzureDocumentIntelligenceService();
       const extractedData = await azureService.extractDataFromDocument(document.filePath, document.documentType);
       
