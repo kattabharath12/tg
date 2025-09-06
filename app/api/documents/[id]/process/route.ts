@@ -71,11 +71,11 @@ export async function POST(
         case 'W2':
         case 'W2_CORRECTED':
           console.log("🔍 [PROCESS] Processing W2 document...")
-          processedEntries = await processW2Document(extractedTaxData.extractedData as ExtractedFieldData || extractedTaxData as ExtractedFieldData);
+          processedEntries = await processW2Document((extractedTaxData.extractedData || extractedTaxData) as unknown as ExtractedFieldData);
           break;
         case 'FORM_1099_INT':
           console.log("🔍 [PROCESS] Processing 1099-INT document...")
-          processedEntries = await process1099IntDocument(extractedTaxData.extractedData as ExtractedFieldData || extractedTaxData as ExtractedFieldData);
+          processedEntries = await process1099IntDocument((extractedTaxData.extractedData || extractedTaxData) as unknown as ExtractedFieldData);
           break;
         case 'FORM_1099_DIV':
           console.log("🔍 [PROCESS] Processing 1099-DIV document...")
