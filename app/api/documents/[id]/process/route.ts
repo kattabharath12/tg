@@ -103,7 +103,6 @@ export async function POST(
         data: {
           extractedData: extractedTaxData,
           processingStatus: 'COMPLETED',
-          processedAt: new Date(),
         },
       });
 
