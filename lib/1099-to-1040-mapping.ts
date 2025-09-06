@@ -90,11 +90,91 @@ export class Form1099ToForm1040Mapper {
     // Income Mapping based on 1099 type
     console.log('🔍 [1099 MAPPER] Starting income mapping...');
 
-    // 1099-INT: Interest Income → Line 2b (Taxable interest)
+    // ENHANCED: Complete 1099-INT field mappings
+    
+    // Box 1: Interest Income → Line 2b (Taxable interest)
     const interestIncome = this.parseAmount(actual1099Data.interestIncome);
     if (interestIncome > 0) {
       form1040Data.line2b = (form1040Data.line2b || 0) + interestIncome;
       console.log('✅ [1099 MAPPER] Mapped interest income to Line 2b:', form1040Data.line2b);
+    }
+    
+    // Box 3: Interest on U.S. Savings Bonds → Line 2b (included in taxable interest)
+    const interestOnUSavingsBonds = this.parseAmount(actual1099Data.interestOnUSavingsBonds);
+    if (interestOnUSavingsBonds > 0) {
+      form1040Data.line2b = (form1040Data.line2b || 0) + interestOnUSavingsBonds;
+      console.log('✅ [1099 MAPPER] Mapped U.S. Savings Bonds interest to Line 2b:', form1040Data.line2b);
+    }
+    
+    // Box 8: Tax-exempt interest → Line 2a (Tax-exempt interest)
+    const taxExemptInterest = this.parseAmount(actual1099Data.taxExemptInterest);
+    if (taxExemptInterest > 0) {
+      form1040Data.line2a = (form1040Data.line2a || 0) + taxExemptInterest;
+      console.log('✅ [1099 MAPPER] Mapped tax-exempt interest to Line 2a:', form1040Data.line2a);
+    }
+    
+    // Box 9: Specified private activity bond interest → Form 6251 (AMT)
+    const specifiedPrivateActivityBondInterest = this.parseAmount(actual1099Data.specifiedPrivateActivityBondInterest);
+    if (specifiedPrivateActivityBondInterest > 0) {
+      // This affects AMT calculation - store for later processing
+      if (!form1040Data.amtAdjustments) form1040Data.amtAdjustments = {};
+      form1040Data.amtAdjustments.privateActivityBondInterest = specifiedPrivateActivityBondInterest;
+      console.log('✅ [1099 MAPPER] Mapped private activity bond interest for AMT:', specifiedPrivateActivityBondInterest);
+    }
+    
+    // Box 10: Market discount → Adjust taxable interest
+    const marketDiscount = this.parseAmount(actual1099Data.marketDiscount);
+    if (marketDiscount > 0) {
+      form1040Data.line2b = (form1040Data.line2b || 0) + marketDiscount;
+      console.log('✅ [1099 MAPPER] Added market discount to Line 2b:', form1040Data.line2b);
+    }
+    
+    // Box 11: Bond premium → Reduce taxable interest
+    const bondPremium = this.parseAmount(actual1099Data.bondPremium);
+    if (bondPremium > 0) {
+      form1040Data.line2b = Math.max(0, (form1040Data.line2b || 0) - bondPremium);
+      console.log('✅ [1099 MAPPER] Reduced Line 2b by bond premium:', form1040Data.line2b);
+    }
+    
+    // Box 13: State tax withheld → Schedule A (if itemizing)
+    const stateTaxWithheld = this.parseAmount(actual1099Data.stateTaxWithheld);
+    if (stateTaxWithheld > 0) {
+      if (!form1040Data.scheduleA) form1040Data.scheduleA = {};
+      form1040Data.scheduleA.stateTaxWithheld = (form1040Data.scheduleA.stateTaxWithheld || 0) + stateTaxWithheld;
+      console.log('✅ [1099 MAPPER] Mapped state tax withheld to Schedule A:', stateTaxWithheld);
+    }
+    
+    // Box 15: State interest → State tax return
+    const stateInterest = this.parseAmount(actual1099Data.stateInterest);
+    if (stateInterest > 0) {
+      if (!form1040Data.stateData) form1040Data.stateData = {};
+      form1040Data.stateData.interestIncome = (form1040Data.stateData.interestIncome || 0) + stateInterest;
+      console.log('✅ [1099 MAPPER] Mapped state interest for state return:', stateInterest);
+    }
+    
+    // Box 2: Early withdrawal penalty → Schedule 1 Line 2b
+    const earlyWithdrawalPenalty = this.parseAmount(actual1099Data.earlyWithdrawalPenalty);
+    if (earlyWithdrawalPenalty > 0) {
+      if (!form1040Data.schedule1) form1040Data.schedule1 = {};
+      form1040Data.schedule1.earlyWithdrawalPenalty = (form1040Data.schedule1.earlyWithdrawalPenalty || 0) + earlyWithdrawalPenalty;
+      console.log('✅ [1099 MAPPER] Mapped early withdrawal penalty to Schedule 1:', earlyWithdrawalPenalty);
+    }
+    
+    // Box 5: Investment expenses → Schedule A (if itemizing)
+    const investmentExpenses = this.parseAmount(actual1099Data.investmentExpenses);
+    if (investmentExpenses > 0) {
+      if (!form1040Data.scheduleA) form1040Data.scheduleA = {};
+      form1040Data.scheduleA.investmentExpenses = (form1040Data.scheduleA.investmentExpenses || 0) + investmentExpenses;
+      console.log('✅ [1099 MAPPER] Mapped investment expenses to Schedule A:', investmentExpenses);
+    }
+    
+    // Box 6: Foreign tax paid → Form 1116 or Schedule 3
+    const foreignTaxPaid = this.parseAmount(actual1099Data.foreignTaxPaid);
+    if (foreignTaxPaid > 0) {
+      if (!form1040Data.foreignTaxCredit) form1040Data.foreignTaxCredit = {};
+      form1040Data.foreignTaxCredit.foreignTaxPaid = (form1040Data.foreignTaxCredit.foreignTaxPaid || 0) + foreignTaxPaid;
+      form1040Data.foreignTaxCredit.foreignCountry = actual1099Data.foreignCountry || 'Unknown';
+      console.log('✅ [1099 MAPPER] Mapped foreign tax paid for foreign tax credit:', foreignTaxPaid);
     }
 
     // 1099-DIV: Dividend Income
@@ -214,13 +294,134 @@ export class Form1099ToForm1040Mapper {
       });
     }
 
+    // ENHANCED: Complete 1099-INT field mappings
     if (form1099Data.interestIncome) {
       mappings.push({
-        form1099Field: 'Interest Income',
+        form1099Field: 'Interest Income (Box 1)',
         form1099Value: form1099Data.interestIncome,
         form1040Line: 'Line 2b',
         form1040Value: this.parseAmount(form1099Data.interestIncome),
         description: 'Taxable interest income'
+      });
+    }
+
+    if (form1099Data.earlyWithdrawalPenalty) {
+      mappings.push({
+        form1099Field: 'Early Withdrawal Penalty (Box 2)',
+        form1099Value: form1099Data.earlyWithdrawalPenalty,
+        form1040Line: 'Schedule 1 Line 2b',
+        form1040Value: this.parseAmount(form1099Data.earlyWithdrawalPenalty),
+        description: 'Early withdrawal penalty (deduction)'
+      });
+    }
+
+    if (form1099Data.interestOnUSavingsBonds) {
+      mappings.push({
+        form1099Field: 'Interest on U.S. Savings Bonds (Box 3)',
+        form1099Value: form1099Data.interestOnUSavingsBonds,
+        form1040Line: 'Line 2b',
+        form1040Value: this.parseAmount(form1099Data.interestOnUSavingsBonds),
+        description: 'U.S. Treasury obligations interest'
+      });
+    }
+
+    if (form1099Data.investmentExpenses) {
+      mappings.push({
+        form1099Field: 'Investment Expenses (Box 5)',
+        form1099Value: form1099Data.investmentExpenses,
+        form1040Line: 'Schedule A',
+        form1040Value: this.parseAmount(form1099Data.investmentExpenses),
+        description: 'Investment expenses (itemized deduction)'
+      });
+    }
+
+    if (form1099Data.foreignTaxPaid) {
+      mappings.push({
+        form1099Field: 'Foreign Tax Paid (Box 6)',
+        form1099Value: form1099Data.foreignTaxPaid,
+        form1040Line: 'Form 1116/Schedule 3',
+        form1040Value: this.parseAmount(form1099Data.foreignTaxPaid),
+        description: 'Foreign tax credit'
+      });
+    }
+
+    if (form1099Data.foreignCountry) {
+      mappings.push({
+        form1099Field: 'Foreign Country (Box 7)',
+        form1099Value: form1099Data.foreignCountry,
+        form1040Line: 'Form 1116',
+        form1040Value: form1099Data.foreignCountry,
+        description: 'Foreign country for tax credit'
+      });
+    }
+
+    if (form1099Data.taxExemptInterest) {
+      mappings.push({
+        form1099Field: 'Tax-Exempt Interest (Box 8)',
+        form1099Value: form1099Data.taxExemptInterest,
+        form1040Line: 'Line 2a',
+        form1040Value: this.parseAmount(form1099Data.taxExemptInterest),
+        description: 'Tax-exempt interest'
+      });
+    }
+
+    if (form1099Data.specifiedPrivateActivityBondInterest) {
+      mappings.push({
+        form1099Field: 'Private Activity Bond Interest (Box 9)',
+        form1099Value: form1099Data.specifiedPrivateActivityBondInterest,
+        form1040Line: 'Form 6251 (AMT)',
+        form1040Value: this.parseAmount(form1099Data.specifiedPrivateActivityBondInterest),
+        description: 'AMT adjustment for private activity bonds'
+      });
+    }
+
+    if (form1099Data.marketDiscount) {
+      mappings.push({
+        form1099Field: 'Market Discount (Box 10)',
+        form1099Value: form1099Data.marketDiscount,
+        form1040Line: 'Line 2b',
+        form1040Value: this.parseAmount(form1099Data.marketDiscount),
+        description: 'Market discount added to taxable interest'
+      });
+    }
+
+    if (form1099Data.bondPremium) {
+      mappings.push({
+        form1099Field: 'Bond Premium (Box 11)',
+        form1099Value: form1099Data.bondPremium,
+        form1040Line: 'Line 2b (reduction)',
+        form1040Value: this.parseAmount(form1099Data.bondPremium),
+        description: 'Bond premium reduces taxable interest'
+      });
+    }
+
+    if (form1099Data.stateTaxWithheld) {
+      mappings.push({
+        form1099Field: 'State Tax Withheld (Box 13)',
+        form1099Value: form1099Data.stateTaxWithheld,
+        form1040Line: 'Schedule A',
+        form1040Value: this.parseAmount(form1099Data.stateTaxWithheld),
+        description: 'State tax withheld (itemized deduction)'
+      });
+    }
+
+    if (form1099Data.statePayerNumber) {
+      mappings.push({
+        form1099Field: 'State Payer Number (Box 14)',
+        form1099Value: form1099Data.statePayerNumber,
+        form1040Line: 'State Return',
+        form1040Value: form1099Data.statePayerNumber,
+        description: 'State identification number'
+      });
+    }
+
+    if (form1099Data.stateInterest) {
+      mappings.push({
+        form1099Field: 'State Interest (Box 15)',
+        form1099Value: form1099Data.stateInterest,
+        form1040Line: 'State Return',
+        form1040Value: this.parseAmount(form1099Data.stateInterest),
+        description: 'Interest for state tax purposes'
       });
     }
 
