@@ -121,8 +121,7 @@ export async function POST(
       await prisma.document.update({
         where: { id: documentId },
         data: { 
-          processingStatus: 'FAILED' as any, // Type assertion to bypass enum check
-          processingError: processingError.message 
+          processingStatus: 'FAILED' as any, // Type assertion to bypass enum check 
         },
       });
 
