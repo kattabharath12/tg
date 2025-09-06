@@ -79,19 +79,19 @@ export async function POST(
           break;
         case 'FORM_1099_DIV':
           console.log("🔍 [PROCESS] Processing 1099-DIV document...")
-          processedEntries = await process1099DivDocument(extractedTaxData.extractedData || extractedTaxData);
+          processedEntries = await process1099DivDocument((extractedTaxData.extractedData || extractedTaxData) as unknown as ExtractedFieldData);
           break;
         case 'FORM_1099_MISC':
           console.log("🔍 [PROCESS] Processing 1099-MISC document...")
-          processedEntries = await process1099MiscDocument(extractedTaxData.extractedData || extractedTaxData);
+          processedEntries = await process1099MiscDocument((extractedTaxData.extractedData || extractedTaxData) as unknown as ExtractedFieldData);
           break;
         case 'FORM_1099_NEC':
           console.log("🔍 [PROCESS] Processing 1099-NEC document...")
-          processedEntries = await process1099NecDocument(extractedTaxData.extractedData || extractedTaxData);
+          processedEntries = await process1099NecDocument((extractedTaxData.extractedData || extractedTaxData) as unknown as ExtractedFieldData);
           break;
         default:
           console.log("⚠️ [PROCESS] Unknown document type, creating generic entries...")
-          processedEntries = await processGenericDocument(extractedTaxData.extractedData || extractedTaxData);
+          processedEntries = await processGenericDocument((extractedTaxData.extractedData || extractedTaxData) as unknown as ExtractedFieldData);
           break;
       }
 
