@@ -1,6 +1,5 @@
 
 
-
 import { DocumentAnalysisClient, AzureKeyCredential } from "@azure/ai-form-recognizer";
 import { DocumentType } from "@prisma/client";
 import { readFile } from "fs/promises";
@@ -692,19 +691,22 @@ export class AzureDocumentIntelligenceService {
     
     const data = { ...baseData };
     
-    // Extract personal information using 1099-specific patterns
+    // Extract personal information using enhanced patterns
     const personalInfo = this.extractPersonalInfoFromOCR(ocrText);
     if (personalInfo.name) data.recipientName = personalInfo.name;
     if (personalInfo.tin) data.recipientTIN = personalInfo.tin;
     if (personalInfo.address) data.recipientAddress = personalInfo.address;
     if (personalInfo.payerName) data.payerName = personalInfo.payerName;
     if (personalInfo.payerTIN) data.payerTIN = personalInfo.payerTIN;
+    if (personalInfo.payerAddress) data.payerAddress = personalInfo.payerAddress;
     
-    // Extract account number
+    // Enhanced account number extraction with multiple patterns
     const accountNumberPatterns = [
       /Account\s+number[:\s]*([A-Z0-9\-]+)/i,
       /Account[:\s]*([A-Z0-9\-]+)/i,
-      /Acct[:\s]*([A-Z0-9\-]+)/i
+      /Acct[:\s]*([A-Z0-9\-]+)/i,
+      /Account\s+no[.:\s]*([A-Z0-9\-]+)/i,
+      /Acct\s+no[.:\s]*([A-Z0-9\-]+)/i
     ];
     
     for (const pattern of accountNumberPatterns) {
@@ -716,85 +718,100 @@ export class AzureDocumentIntelligenceService {
       }
     }
     
-    // Enhanced 1099-INT specific amount patterns for all boxes
+    // Enhanced 1099-INT specific amount patterns with better regex
     const amountPatterns = {
       interestIncome: [
-        /1\s+Interest\s+income\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*1\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+1[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /1\s+Interest\s+income[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*1\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+1[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /1\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       earlyWithdrawalPenalty: [
-        /2\s+Early\s+withdrawal\s+penalty\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*2\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+2[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /2\s+Early\s+withdrawal\s+penalty[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*2\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+2[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /2\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       interestOnUSavingsBonds: [
-        /3\s+Interest\s+on\s+U\.?S\.?\s+Savings\s+Bonds\s+and\s+Treasury\s+obligations\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*3\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+3[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /3\s+Interest\s+on\s+U\.?S\.?\s+Savings\s+Bonds[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*3\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+3[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /3\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       federalTaxWithheld: [
-        /4\s+Federal\s+income\s+tax\s+withheld\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*4\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+4[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /4\s+Federal\s+income\s+tax\s+withheld[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*4\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+4[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /4\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       investmentExpenses: [
-        /5\s+Investment\s+expenses\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*5\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+5[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /5\s+Investment\s+expenses[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*5\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+5[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /5\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       foreignTaxPaid: [
-        /6\s+Foreign\s+tax\s+paid\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*6\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+6[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /6\s+Foreign\s+tax\s+paid[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*6\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+6[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /6\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       taxExemptInterest: [
-        /8\s+Tax-exempt\s+interest\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*8\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+8[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /8\s+Tax-exempt\s+interest[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*8\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+8[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /8\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       specifiedPrivateActivityBondInterest: [
-        /9\s+Specified\s+private\s+activity\s+bond\s+interest\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*9\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+9[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /9\s+Specified\s+private\s+activity\s+bond\s+interest[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*9\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+9[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /9\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       marketDiscount: [
-        /10\s+Market\s+discount\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*10\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+10[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /10\s+Market\s+discount[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*10\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+10[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /10\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       bondPremium: [
-        /11\s+Bond\s+premium\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*11\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+11[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /11\s+Bond\s+premium[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*11\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+11[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /11\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       bondPremiumOnTreasuryObligations: [
-        /12\s+Bond\s+premium\s+on\s+Treasury\s+obligations\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*12\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+12[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /12\s+Bond\s+premium\s+on\s+Treasury\s+obligations[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*12\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+12[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /12\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       bondPremiumOnTaxExemptBond: [
-        /13\s+Bond\s+premium\s+on\s+tax-exempt\s+bond\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*13\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+13[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /13\s+Bond\s+premium\s+on\s+tax-exempt\s+bond[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*13\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+13[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /13\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ],
       taxExemptAndTaxCreditBondCUSIPNo: [
-        /14\s+Tax-exempt\s+and\s+tax\s+credit\s+bond\s+CUSIP\s+no\.\s*[\n\s]*([A-Z0-9]+)/i,
-        /(?:^|\n)\s*14\s+([A-Z0-9]+)/m,
-        /Box\s+14[:\s]*([A-Z0-9]+)/i
+        /14\s+Tax-exempt\s+and\s+tax\s+credit\s+bond\s+CUSIP\s+no\.?[:\s]*([A-Z0-9]+)/i,
+        /(?:^|\n)\s*14\s+[^\w]*([A-Z0-9]+)/m,
+        /Box\s+14[:\s]*([A-Z0-9]+)/i,
+        /14\s+[^\n]*([A-Z0-9]+)/i
       ],
       stateTaxWithheld: [
-        /17\s+State\s+tax\s+withheld\s*[\n\s]*\$?([0-9,]+\.?\d{0,2})/i,
-        /(?:^|\n)\s*17\s+\$?([0-9,]+\.?\d{0,2})/m,
-        /Box\s+17[:\s]*\$?([0-9,]+\.?\d{0,2})/i
+        /17\s+State\s+tax\s+withheld[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /(?:^|\n)\s*17\s+[^\d]*\$?([0-9,]+\.?\d{0,2})/m,
+        /Box\s+17[:\s]*\$?([0-9,]+\.?\d{0,2})/i,
+        /17\s+[^\n]*\$([0-9,]+\.?\d{0,2})/i
       ]
     };
     
-    // Extract state and state identification number
+    // Enhanced state extraction with better patterns
     const statePatterns = [
-      /15\s+State\s*[\n\s]*([A-Z]{2})/i,
+      /15\s+State[:\s]*([A-Z]{2})/i,
       /(?:^|\n)\s*15\s+([A-Z]{2})/m,
-      /Box\s+15[:\s]*([A-Z]{2})/i
+      /Box\s+15[:\s]*([A-Z]{2})/i,
+      /15\s+[^\n]*([A-Z]{2})/i
     ];
     
     for (const pattern of statePatterns) {
@@ -806,10 +823,12 @@ export class AzureDocumentIntelligenceService {
       }
     }
     
+    // Enhanced state identification number extraction
     const stateIdPatterns = [
-      /16\s+State\s+identification\s+no\.\s*[\n\s]*([0-9]+)/i,
+      /16\s+State\s+identification\s+no\.?[:\s]*([0-9]+)/i,
       /(?:^|\n)\s*16\s+([0-9]+)/m,
-      /Box\s+16[:\s]*([0-9]+)/i
+      /Box\s+16[:\s]*([0-9]+)/i,
+      /16\s+[^\n]*([0-9]+)/i
     ];
     
     for (const pattern of stateIdPatterns) {
@@ -821,7 +840,7 @@ export class AzureDocumentIntelligenceService {
       }
     }
     
-    // Extract all amount fields
+    // Extract all amount fields with enhanced error handling
     for (const [fieldName, patterns] of Object.entries(amountPatterns)) {
       for (const pattern of patterns) {
         const match = ocrText.match(pattern);
@@ -831,8 +850,8 @@ export class AzureDocumentIntelligenceService {
             data[fieldName] = match[1].trim();
             console.log(`✅ [Azure DI OCR] Found ${fieldName}: ${data[fieldName]}`);
           } else {
-            // Handle monetary amounts
-            const amountStr = match[1].replace(/,/g, '');
+            // Handle monetary amounts with better parsing
+            const amountStr = match[1].replace(/[,$\s]/g, '');
             const amount = parseFloat(amountStr);
             
             if (!isNaN(amount) && amount >= 0) {
@@ -1023,62 +1042,100 @@ export class AzureDocumentIntelligenceService {
   }
 
   private extractPersonalInfoFromOCR(ocrText: string): any {
-    // Extract personal information patterns
+    // Enhanced personal information extraction patterns
     const personalInfo: any = {};
     
-    // Extract recipient name (usually appears after "RECIPIENT'S name")
+    // Extract recipient name with better patterns
     const namePatterns = [
-      /RECIPIENT'S\s+name[:\s]*([A-Za-z\s,\.]+)/i,
-      /Recipient[:\s]*([A-Za-z\s,\.]+)/i
+      /RECIPIENT'S\s+name[:\s]*([A-Za-z\s,\.'-]+?)(?:\n|$)/i,
+      /Recipient[:\s]*([A-Za-z\s,\.'-]+?)(?:\n|$)/i,
+      /RECIPIENT'S\s+name[:\s]*([A-Za-z\s,\.'-]+?)(?:\s+RECIPIENT'S|\s+TIN|\s+address)/i
     ];
     
     for (const pattern of namePatterns) {
       const match = ocrText.match(pattern);
       if (match && match[1]) {
         personalInfo.name = match[1].trim();
+        console.log(`✅ [Azure DI OCR] Found recipient name: ${personalInfo.name}`);
         break;
       }
     }
     
-    // Extract recipient TIN/SSN
+    // Extract recipient TIN/SSN with better patterns
     const tinPatterns = [
       /RECIPIENT'S\s+TIN[:\s]*([0-9\-]+)/i,
       /SSN[:\s]*([0-9\-]+)/i,
-      /TIN[:\s]*([0-9\-]+)/i
+      /TIN[:\s]*([0-9\-]+)/i,
+      /RECIPIENT'S\s+TIN[:\s]*([0-9\-]+)/i
     ];
     
     for (const pattern of tinPatterns) {
       const match = ocrText.match(pattern);
       if (match && match[1]) {
         personalInfo.tin = match[1].trim();
+        console.log(`✅ [Azure DI OCR] Found recipient TIN: ${personalInfo.tin}`);
         break;
       }
     }
     
-    // Extract payer name
+    // Extract recipient address with enhanced patterns
+    const addressPatterns = [
+      /RECIPIENT'S\s+address[:\s]*([^\n]+(?:\n[^\n]+)*?)(?:\n\s*Account|\n\s*1\s+|$)/i,
+      /address[:\s]*([^\n]+(?:\n[^\n]+)*?)(?:\n\s*Account|\n\s*1\s+|$)/i
+    ];
+    
+    for (const pattern of addressPatterns) {
+      const match = ocrText.match(pattern);
+      if (match && match[1]) {
+        personalInfo.address = match[1].trim().replace(/\n/g, ' ');
+        console.log(`✅ [Azure DI OCR] Found recipient address: ${personalInfo.address}`);
+        break;
+      }
+    }
+    
+    // Extract payer name with better patterns
     const payerNamePatterns = [
-      /PAYER'S\s+name[:\s]*([A-Za-z\s,\.]+)/i,
-      /Payer[:\s]*([A-Za-z\s,\.]+)/i
+      /PAYER'S\s+name[:\s]*([A-Za-z\s,\.'-]+?)(?:\n|$)/i,
+      /Payer[:\s]*([A-Za-z\s,\.'-]+?)(?:\n|$)/i,
+      /PAYER'S\s+name[:\s]*([A-Za-z\s,\.'-]+?)(?:\s+PAYER'S|\s+TIN|\s+address)/i
     ];
     
     for (const pattern of payerNamePatterns) {
       const match = ocrText.match(pattern);
       if (match && match[1]) {
         personalInfo.payerName = match[1].trim();
+        console.log(`✅ [Azure DI OCR] Found payer name: ${personalInfo.payerName}`);
         break;
       }
     }
     
-    // Extract payer TIN
+    // Extract payer TIN with better patterns
     const payerTinPatterns = [
       /PAYER'S\s+TIN[:\s]*([0-9\-]+)/i,
-      /Payer\s+TIN[:\s]*([0-9\-]+)/i
+      /Payer\s+TIN[:\s]*([0-9\-]+)/i,
+      /PAYER'S\s+TIN[:\s]*([0-9\-]+)/i
     ];
     
     for (const pattern of payerTinPatterns) {
       const match = ocrText.match(pattern);
       if (match && match[1]) {
         personalInfo.payerTIN = match[1].trim();
+        console.log(`✅ [Azure DI OCR] Found payer TIN: ${personalInfo.payerTIN}`);
+        break;
+      }
+    }
+    
+    // Extract payer address with enhanced patterns
+    const payerAddressPatterns = [
+      /PAYER'S\s+address[:\s]*([^\n]+(?:\n[^\n]+)*?)(?:\n\s*RECIPIENT|\n\s*Account|\n\s*1\s+|$)/i,
+      /PAYER'S\s+address[:\s]*([^\n]+(?:\n[^\n]+)*?)(?:\n\s*[A-Z]{2}\s+\d{5})/i
+    ];
+    
+    for (const pattern of payerAddressPatterns) {
+      const match = ocrText.match(pattern);
+      if (match && match[1]) {
+        personalInfo.payerAddress = match[1].trim().replace(/\n/g, ' ');
+        console.log(`✅ [Azure DI OCR] Found payer address: ${personalInfo.payerAddress}`);
         break;
       }
     }
